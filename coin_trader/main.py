@@ -49,6 +49,11 @@ _LLM_MAX_SKIP_SECONDS = 1800.0
 _recent_decisions: dict[str, list[dict[str, str]]] = {}
 _MAX_DECISION_HISTORY = 5
 
+_btc_trend_cache: dict[str, object] = {}
+_btc_trend_cache_ts: float = 0.0
+_BTC_TREND_CACHE_TTL = 60.0
+_BTC_SYMBOL = "BTC/KRW"
+
 
 def _build_system(settings: Settings, *, install_signal_handlers: bool = False) -> dict[str, Any]:
     setup_logging(log_dir=settings.log_dir, log_level=settings.log_level)
@@ -191,6 +196,154 @@ def _resolve_action(
     return "HOLD"
 
 
+def _compute_portfolio_exposure(
+    positions: list[Any],
+    total_balance: Decimal,
+) -> dict[str, object]:
+    if total_balance <= 0:
+        return {}
+    exposure: dict[str, object] = {}
+    alt_total = Decimal("0")
+    for p in positions:
+        if p.quantity <= 0 or p.current_price is None:
+            continue
+        value = p.quantity * p.current_price
+        pct = value / total_balance * Decimal("100")
+        coin = p.symbol.split("/")[0] if "/" in p.symbol else p.symbol
+        exposure[f"{coin}_pct"] = str(round(pct, 2))
+        if coin != "BTC":
+            alt_total += pct
+    exposure["alt_total_pct"] = str(round(alt_total, 2))
+    return exposure
+
+
+def _compute_recent_structure(
+    candles: list[Any],
+    lookback: int = 20,
+) -> dict[str, object]:
+    if len(candles) < lookback:
+        return {
+            "higher_high": False,
+            "higher_low": False,
+            "lower_high": False,
+            "lower_low": False,
+            "range_market": True,
+        }
+
+    recent = candles[-lookback:]
+    highs = [float(str(c.get("high_price", c.get("high", 0)) or 0)) for c in recent]
+    lows = [float(str(c.get("low_price", c.get("low", 0)) or 0)) for c in recent]
+
+    mid = len(highs) // 2
+    first_half_high = max(highs[:mid]) if highs[:mid] else 0
+    second_half_high = max(highs[mid:]) if highs[mid:] else 0
+    first_half_low = min(lows[:mid]) if lows[:mid] else 0
+    second_half_low = min(lows[mid:]) if lows[mid:] else 0
+
+    hh = second_half_high > first_half_high
+    hl = second_half_low > first_half_low
+    lh = second_half_high < first_half_high
+    ll = second_half_low < first_half_low
+
+    is_range = not hh and not ll
+
+    return {
+        "higher_high": hh,
+        "higher_low": hl,
+        "lower_high": lh,
+        "lower_low": ll,
+        "range_market": is_range,
+    }
+
+
+def _compute_volume_context(
+    candles: list[Any],
+    window: int = 10,
+) -> dict[str, object]:
+    if len(candles) < window + 1:
+        return {"volume_vs_avg_ratio": 1.0, "volume_trend": "flat"}
+
+    volumes = [
+        float(str(c.get("candle_acc_trade_volume", c.get("volume", 0)) or 0)) for c in candles
+    ]
+    recent = volumes[-window:]
+    avg = sum(recent) / len(recent) if recent else 1.0
+    current = volumes[-1] if volumes else 0.0
+    ratio = round(current / avg, 2) if avg > 0 else 0.0
+
+    first_half = sum(recent[: window // 2]) / (window // 2) if window >= 2 else avg
+    second_half = sum(recent[window // 2 :]) / (window - window // 2) if window >= 2 else avg
+    threshold = 0.1
+    if second_half > first_half * (1 + threshold):
+        trend = "increasing"
+    elif second_half < first_half * (1 - threshold):
+        trend = "decreasing"
+    else:
+        trend = "flat"
+
+    return {"volume_vs_avg_ratio": ratio, "volume_trend": trend}
+
+
+def _compute_decision_context(
+    symbol: str,
+    positions: list[Any],
+    trade_price: Decimal,
+    risk_limits: Any,
+) -> str:
+    for p in positions:
+        if p.symbol != symbol or p.quantity <= 0:
+            continue
+        pos_with_price = p.model_copy(update={"current_price": trade_price})
+        pnl_pct = pos_with_price.unrealized_pnl_pct
+        if pnl_pct is None:
+            return "add_position"
+        if pnl_pct <= -abs(risk_limits.soft_stop_loss_pct):
+            return "risk_management"
+        if pnl_pct >= risk_limits.take_profit_pct:
+            return "reduce_position"
+        return "add_position"
+    return "new_entry"
+
+
+async def _compute_btc_trend(
+    exchange_adapter: Any,
+    strategy: Any,
+    current_symbol: str,
+) -> dict[str, object] | None:
+    global _btc_trend_cache, _btc_trend_cache_ts
+
+    now = time.time()
+    if now - _btc_trend_cache_ts < _BTC_TREND_CACHE_TTL and _btc_trend_cache:
+        return _btc_trend_cache  # type: ignore[return-value]
+
+    try:
+        if _BTC_SYMBOL not in strategy._candle_history:
+            btc_candles = await exchange_adapter.get_candles(
+                _BTC_SYMBOL, interval="minutes/60", count=200
+            )
+            strategy.update_candles(_BTC_SYMBOL, btc_candles)
+
+        btc_indicators = strategy.compute_indicators(_BTC_SYMBOL)
+        if btc_indicators is None:
+            return None
+
+        result: dict[str, object] = {
+            "price_above_ema200": btc_indicators.current_price > btc_indicators.ema200,
+            "rsi": btc_indicators.rsi,
+            "adx": btc_indicators.adx,
+            "plus_di": btc_indicators.plus_di,
+            "minus_di": btc_indicators.minus_di,
+            "ema200": btc_indicators.ema200,
+            "current_price": btc_indicators.current_price,
+            "trend_strength": btc_indicators.trend_strength,
+        }
+        _btc_trend_cache = result  # type: ignore[assignment]
+        _btc_trend_cache_ts = now
+        return result
+    except Exception:
+        return None
+
+
 async def _run_tick(
     components: dict[str, Any],
     symbol: str,
@@ -214,6 +367,10 @@ async def _run_tick(
         ticker = await exchange_adapter.get_ticker(symbol)
         anomaly_monitor.record_api_success()
     except Exception as e:
+        err_text = str(e)
+        if "429" in err_text or "Too Many Requests" in err_text:
+            logger.warning("upbit_rate_limited", symbol=symbol, error=err_text)
+            return
         event = anomaly_monitor.record_api_failure()
         if event:
             logger.error("api_failure_threshold", symbol=symbol, error=str(e))
@@ -278,9 +435,17 @@ async def _run_tick(
     store.save_balance_snapshot(balances)
 
     total_balance = balances.total_value_krw or Decimal("0")
+    current_symbol_value = Decimal("0")
+    for p in positions:
+        if p.symbol != symbol or p.quantity <= 0:
+            continue
+        pos_price = trade_price if p.symbol == symbol else (p.current_price or Decimal("0"))
+        current_symbol_value += p.quantity * pos_price
+
     state: dict[str, Any] = {
         "total_balance": total_balance,
         "position_count": len(positions),
+        "current_symbol_value": current_symbol_value,
         "today_pnl": Decimal("0"),
         "market_price": trade_price,
     }
@@ -299,14 +464,20 @@ async def _run_tick(
 
     if llm_advisor is not None and not _skip_llm:
         try:
+            change_24h_pct = Decimal("0")
+            if prev_close > 0:
+                change_24h_pct = (trade_price - prev_close) / prev_close * Decimal("100")
+
             market_summary: dict[str, object] = {
                 "symbol": symbol,
+                "timeframe": "1h",
                 "current_time": now.isoformat().replace("+00:00", "Z"),
                 "price": str(trade_price),
                 "open": str(md.open),
                 "high": str(md.high),
                 "low": str(md.low),
                 "volume": str(md.volume),
+                "change_24h_pct": str(round(change_24h_pct, 2)),
             }
             strategy_signal_data = [
                 {
@@ -318,23 +489,31 @@ async def _run_tick(
             ]
 
             indicators = strategy.compute_indicators(symbol)
-            indicators_dict = indicators.to_dict() if indicators else None
+            indicators_dict = indicators.to_llm_dict() if indicators else None
             if indicators_dict:
                 indicators_dict.pop("current_price", None)
 
-            position_data = [
-                {
-                    "symbol": p.symbol,
-                    "quantity": str(p.quantity),
-                    "average_entry_price": str(p.average_entry_price),
-                    "current_price": str(trade_price),
-                    "unrealized_pnl_pct": str(
-                        p.model_copy(update={"current_price": trade_price}).unrealized_pnl_pct or 0
-                    ),
-                }
-                for p in positions
-                if p.quantity > 0
-            ]
+            position_data = []
+            for p in positions:
+                if p.quantity <= 0:
+                    continue
+                if p.symbol == symbol:
+                    pos_price = trade_price
+                    pos_with_price = p.model_copy(update={"current_price": trade_price})
+                else:
+                    pos_price = p.current_price or Decimal("0")
+                    pos_with_price = p
+                position_data.append(
+                    {
+                        "symbol": p.symbol,
+                        "quantity": str(p.quantity),
+                        "average_entry_price": str(p.average_entry_price),
+                        "current_price": str(pos_price),
+                        "unrealized_pnl_pct": str(pos_with_price.unrealized_pnl_pct or 0),
+                    }
+                )
+
+            portfolio_exposure = _compute_portfolio_exposure(positions, total_balance)
 
             balance_data: dict[str, object] = {
                 "total_balance_krw": str(total_balance),
@@ -373,6 +552,46 @@ async def _run_tick(
                 for c in candles[-settings.llm_recent_candles_count :]
             ]
 
+            btc_trend = await _compute_btc_trend(exchange_adapter, strategy, symbol)
+
+            atr_stop_distance: str | None = None
+            if indicators and indicators.atr > 0:
+                atr_stop_distance = str(
+                    round(indicators.atr * float(settings.risk.atr_stop_multiplier), 2)
+                )
+
+            risk_context: dict[str, object] = {
+                "atr_stop_distance": atr_stop_distance,
+                "max_single_coin_exposure_pct": str(settings.risk.max_single_coin_exposure_pct),
+                "max_alt_total_exposure_pct": str(settings.risk.max_alt_total_exposure_pct),
+            }
+
+            current_symbol_position: dict[str, object] | None = None
+            for p in positions:
+                if p.symbol == symbol and p.quantity > 0:
+                    pos_price = trade_price
+                    pos_with = p.model_copy(update={"current_price": trade_price})
+                    pos_value = p.quantity * pos_price
+                    pos_pct = (
+                        float(pos_value / total_balance * Decimal("100"))
+                        if total_balance > 0
+                        else 0.0
+                    )
+                    current_symbol_position = {
+                        "quantity": str(p.quantity),
+                        "average_entry_price": str(p.average_entry_price),
+                        "unrealized_pnl_pct": str(pos_with.unrealized_pnl_pct or 0),
+                        "position_value_pct_of_portfolio": round(pos_pct, 2),
+                    }
+                    break
+
+            symbol_candles = strategy._candle_history.get(symbol, [])
+            recent_structure = _compute_recent_structure(symbol_candles)
+            volume_context = _compute_volume_context(symbol_candles)
+            decision_context = _compute_decision_context(
+                symbol, positions, trade_price, settings.risk
+            )
+
             advice = await llm_advisor.get_advice(
                 symbol,
                 market_summary,
@@ -383,6 +602,13 @@ async def _run_tick(
                 recent_orders=recent_orders_data,
                 recent_candles=recent_candles_data,
                 previous_decisions=_recent_decisions.get(symbol, []),
+                btc_trend=btc_trend,
+                portfolio_exposure=portfolio_exposure,
+                risk_context=risk_context,
+                current_symbol_position=current_symbol_position,
+                recent_structure=recent_structure,
+                volume_context=volume_context,
+                decision_context=decision_context,
             )
             _last_llm_prices[symbol] = trade_price
             _last_llm_times[symbol] = time.time()
@@ -497,6 +723,15 @@ async def _run_tick(
                         "trigger": "position_protection",
                     },
                 )
+                if notifier and settings.is_live_mode():
+                    await notifier.send_alert(
+                        "실제 매도 체결 요청",
+                        (
+                            f"{order.symbol} SELL {order.quantity} @ {order.price}"
+                            f"\nstatus={order.status.value}, trigger=position_protection"
+                        ),
+                        "high",
+                    )
                 _high_watermarks.pop(symbol, None)
 
     # 9. Combined decision: strategy signals + LLM advice
@@ -532,7 +767,10 @@ async def _run_tick(
             _recent_decisions[symbol] = hist[-_MAX_DECISION_HISTORY:]
 
     if final_action == "BUY":
-        order_value = total_balance * settings.risk.max_position_size_pct / Decimal("100")
+        buy_pct = settings.risk.max_position_size_pct
+        if advice is not None and advice.buy_pct is not None:
+            buy_pct = max(Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct))
+        order_value = total_balance * buy_pct / Decimal("100")
         if order_value > 0:
             reason_parts = [
                 f"Strategy: {signals[0].metadata.get('reason', 'buy')}" if signals else ""
@@ -561,12 +799,30 @@ async def _run_tick(
                         "status": order.status.value,
                         "quantity": str(order.quantity),
                         "price": str(order.price),
+                        "sizing_pct": str(buy_pct),
                     },
                 )
+                if notifier and settings.is_live_mode():
+                    await notifier.send_alert(
+                        "실제 매수 체결 요청",
+                        (
+                            f"{order.symbol} BUY {order.quantity} @ {order.price}"
+                            f"\nstatus={order.status.value}, sizing_pct={buy_pct}"
+                        ),
+                        "medium",
+                    )
 
     elif final_action == "SELL":
         for pos in positions:
             if pos.symbol == symbol and pos.quantity > 0:
+                sell_qty = pos.quantity
+                sell_pct = Decimal("100")
+                if advice is not None and advice.sell_pct is not None:
+                    sell_pct = max(Decimal("0"), min(advice.sell_pct, Decimal("100")))
+                    sell_qty = pos.quantity * sell_pct / Decimal("100")
+                if sell_qty <= 0:
+                    continue
+
                 reason_parts = [
                     f"Strategy: {signals[0].metadata.get('reason', 'sell')}" if signals else ""
                 ]
@@ -578,7 +834,7 @@ async def _run_tick(
                     symbol=symbol,
                     side=OrderSide.SELL,
                     order_type=OrderType.LIMIT,
-                    quantity=pos.quantity,
+                    quantity=sell_qty,
                     price=trade_price,
                     reason=" | ".join(p for p in reason_parts if p),
                     timestamp=now,
@@ -594,8 +850,18 @@ async def _run_tick(
                             "status": order.status.value,
                             "quantity": str(order.quantity),
                             "price": str(order.price),
+                            "sizing_pct": str(sell_pct),
                         },
                     )
+                    if notifier and settings.is_live_mode():
+                        await notifier.send_alert(
+                            "실제 매도 체결 요청",
+                            (
+                                f"{order.symbol} SELL {order.quantity} @ {order.price}"
+                                f"\nstatus={order.status.value}, sizing_pct={sell_pct}"
+                            ),
+                            "high",
+                        )
 
 
 async def _main_loop(settings: Settings, once: bool = False) -> None:
@@ -603,6 +869,7 @@ async def _main_loop(settings: Settings, once: bool = False) -> None:
     components = _build_system(settings, install_signal_handlers=True)
     store: StateStore = components["store"]
     engine: ExecutionEngine = components["engine"]
+    broker = components["broker"]
     notifier = components.get("notifier")
 
     logger.info(
@@ -638,6 +905,18 @@ async def _main_loop(settings: Settings, once: bool = False) -> None:
                         )
             except Exception as e:
                 logger.error("stale_order_cleanup_error", error=str(e))
+
+            # Sync order statuses (submitted -> filled/cancelled) from exchange
+            try:
+                open_orders = store.get_open_orders()
+                if open_orders and hasattr(broker, "sync_order_statuses"):
+                    updated = await broker.sync_order_statuses(open_orders)
+                    for order in updated:
+                        store.save_order(order)
+                    if updated:
+                        logger.info("order_status_synced", count=len(updated))
+            except Exception as e:
+                logger.error("order_sync_error", error=str(e))
 
             for symbol in settings.trading_symbols:
                 try:

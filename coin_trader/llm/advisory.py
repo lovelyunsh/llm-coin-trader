@@ -32,12 +32,14 @@ class LLMAdvice:
     confidence: Decimal
     reasoning: str
     risk_notes: str = ""
+    buy_pct: Decimal | None = None
+    sell_pct: Decimal | None = None
     _prompt: str = ""
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> "LLMAdvice | None":
         required = {"action", "confidence", "reasoning", "risk_notes"}
-        if set(data.keys()) != required:
+        if not required.issubset(data.keys()):
             return None
 
         action_raw = str(data.get("action", "HOLD")).upper()
@@ -62,47 +64,95 @@ class LLMAdvice:
         if len(risk_notes) > 300:
             return None
 
-        return cls(action=action_raw, confidence=conf, reasoning=reasoning, risk_notes=risk_notes)
+        buy_pct: Decimal | None = None
+        if "buy_pct" in data and data.get("buy_pct") is not None:
+            try:
+                buy_pct = Decimal(str(data.get("buy_pct")))
+            except Exception:
+                return None
+            if buy_pct < Decimal("0"):
+                buy_pct = Decimal("0")
+            if buy_pct > Decimal("100"):
+                buy_pct = Decimal("100")
+
+        sell_pct: Decimal | None = None
+        if "sell_pct" in data and data.get("sell_pct") is not None:
+            try:
+                sell_pct = Decimal(str(data.get("sell_pct")))
+            except Exception:
+                return None
+            if sell_pct < Decimal("0"):
+                sell_pct = Decimal("0")
+            if sell_pct > Decimal("100"):
+                sell_pct = Decimal("100")
+
+        return cls(
+            action=action_raw,
+            confidence=conf,
+            reasoning=reasoning,
+            risk_notes=risk_notes,
+            buy_pct=buy_pct,
+            sell_pct=sell_pct,
+        )
 
 
 class LLMAdvisor:
     """LLM-based advisory - produces bounded suggestions, never orders."""
 
     SYSTEM_PROMPT: str = """You are the PRIMARY decision maker for an automated crypto trading system on Upbit (KRW pairs).
-Technical strategy signals (EMA crossover, RSI, ATR) are provided as REFERENCE DATA — you make the final call.
 
 You will receive:
-- Current market data (OHLCV)
-- Technical indicators (EMA crossover, RSI, ATR, volatility ratio)
-- Current positions and unrealized P&L
-- Account balance information
-- Recent order history
-- Recent candlestick data
+- Market data (OHLCV, 24h change, timeframe)
+- Technical indicators (1h): EMA(12/26/200), RSI, ATR, ADX(+DI/-DI), MACD(line/signal/histogram), Bollinger Bands(upper/middle/lower/width)
+- BTC trend filter (BTC price vs EMA200, RSI, ADX)
+- Current symbol position (if held): quantity, entry price, unrealized P&L, portfolio weight
+- Decision context: new_entry / add_position / reduce_position / risk_management
+- Recent price structure: higher_high, higher_low, lower_high, lower_low, range_market
+- Volume context: volume_vs_avg_ratio, volume_trend (increasing/decreasing/flat)
+- Portfolio exposure (per-coin %, alt total %)
+- Risk context (ATR stop distance, exposure limits)
+- All positions, account balance, recent orders, recent candles
 
-Your output MUST be valid JSON with exactly these fields:
+Your output MUST be valid JSON with these fields:
 - action: one of \"HOLD\", \"BUY_CONSIDER\", \"SELL_CONSIDER\"
 - confidence: float between 0.0 and 1.0
 - reasoning: brief explanation (max 500 chars)
 - risk_notes: any risk concerns (max 300 chars)
+- buy_pct: optional float percent for BUY size (0-10). If omitted, system default is used.
+- sell_pct: optional float percent for SELL size (0-100). If omitted, system default is used.
 
 YOUR AUTHORITY:
 - Your decision IS the trading decision. BUY_CONSIDER = system will buy. SELL_CONSIDER = system will sell.
-- Strategy signals are just indicators for your reference, not co-decision-makers.
-- For positions at -5% to -10% loss: system asks you whether to cut losses. SELL_CONSIDER = sell, HOLD = keep holding.
-- For positions at +10%+ profit: system asks you whether to take profit. Only explicit HOLD keeps the position; otherwise it sells.
+- For positions at -5% to -10% loss: SELL_CONSIDER = sell, HOLD = keep holding.
+- For positions at +10%+ profit: Only explicit HOLD keeps the position; otherwise it sells.
 - Hard stop-loss at -10% is automatic and bypasses you entirely.
 
-GUIDELINES:
-- You have full trading authority. Be decisive, not always conservative.
-- Consider position sizing: if already heavily invested, be cautious about additional buys.
-- Factor in recent order history to avoid overtrading.
-- Use technical indicators as one of many inputs, not as rules.
-- High confidence (>0.8) should be used when you have strong conviction.
-- When genuinely uncertain, recommend HOLD with low confidence.
-- For loss positions (-5% to -10%): consider if the loss is likely to deepen or recover. Cut early if trend is against you.
-- For profit positions (+10%+): consider if momentum supports further gains. Don't be greedy — taking profit is often correct.
+DECISION FRAMEWORK (follow this order strictly):
+1. DATA CHECK: Verify data consistency. If positions show suspicious P&L or prices seem wrong, note in risk_notes.
+2. TIMEFRAME: All indicators are based on the timeframe specified in market data. Interpret accordingly.
+3. BTC FILTER: Check btc_trend. If BTC is below EMA200 with ADX rising and -DI > +DI (downtrend strengthening), block new alt buys. If BTC RSI < 40 and falling, increase caution.
+4. POSITION CHECK: Check current_symbol_position. If null → new entry evaluation. If held → consider decision_context (add_position / reduce_position / risk_management). Avoid repeated buys into already heavy positions.
+5. ADX TREND FILTER: If ADX < 20, market is ranging — avoid trend-following entries. If ADX > 25, trend strategies are valid. Check +DI vs -DI for direction.
+6. MACD + RSI MOMENTUM: Histogram increasing = momentum accelerating. MACD crossing above signal = bullish. RSI >70 = overbought caution, <30 = potential entry. Combine both for momentum direction.
+7. BOLLINGER BANDS: Band squeeze (low bb_width) = volatility expansion imminent. Price near upper band + declining volume = potential reversal. Price bouncing off lower band + rising volume = potential entry.
+8. RECENT STRUCTURE: Check higher_high/higher_low (uptrend structure), lower_high/lower_low (downtrend structure), range_market. Align entries with structure direction.
+9. VOLUME TREND: volume_trend "increasing" with breakout = strong signal. "decreasing" during rally = weak, potential reversal. volume_vs_avg_ratio < 0.5 = low conviction move.
+10. ATR RISK: Use atr_stop_distance as reference for stop-loss sizing. Higher ATR = wider stops needed = smaller position size.
+11. PORTFOLIO CHECK: Respect exposure limits. If single coin > max_single_coin_exposure_pct, do NOT buy more. If alt_total > max_alt_total_exposure_pct, do NOT buy alts.
+12. FINAL DECISION: Synthesize all above into BUY_CONSIDER / SELL_CONSIDER / HOLD with confidence level.
 
-LANGUAGE: Write "reasoning" and "risk_notes" fields in Korean (한국어). Be concise and natural."""
+GUIDELINES:
+- Be decisive. Multiple confirming signals = high confidence. Conflicting signals = HOLD.
+- Factor in recent order history to avoid overtrading.
+- High confidence (>0.8) only with strong multi-indicator confirmation.
+- If action is BUY_CONSIDER, include buy_pct (0-10) based on conviction and volatility.
+- If action is SELL_CONSIDER, include sell_pct (0-100) based on risk urgency.
+- For risk_management context: cut early if trend (ADX + MACD) is against you.
+- For reduce_position context: consider if momentum (MACD histogram) supports further gains.
+- For new_entry: require at least 3 confirming factors (trend + momentum + structure).
+- For add_position: be stricter than new_entry — only add if conviction is higher than initial entry.
+
+LANGUAGE: Write "reasoning" and "risk_notes" in Korean (한국어). Be concise and natural."""
 
     def __init__(
         self,
@@ -171,6 +221,13 @@ LANGUAGE: Write "reasoning" and "risk_notes" fields in Korean (한국어). Be co
         recent_orders: list[dict[str, object]] | None = None,
         recent_candles: list[dict[str, object]] | None = None,
         previous_decisions: list[dict[str, str]] | None = None,
+        btc_trend: dict[str, object] | None = None,
+        portfolio_exposure: dict[str, object] | None = None,
+        risk_context: dict[str, object] | None = None,
+        current_symbol_position: dict[str, object] | None = None,
+        recent_structure: dict[str, object] | None = None,
+        volume_context: dict[str, object] | None = None,
+        decision_context: str | None = None,
     ) -> LLMAdvice | None:
         if self._auth_mode == "api_key" and not self._api_key:
             return None
@@ -185,6 +242,13 @@ LANGUAGE: Write "reasoning" and "risk_notes" fields in Korean (한국어). Be co
             recent_orders=recent_orders,
             recent_candles=recent_candles,
             previous_decisions=previous_decisions,
+            btc_trend=btc_trend,
+            portfolio_exposure=portfolio_exposure,
+            risk_context=risk_context,
+            current_symbol_position=current_symbol_position,
+            recent_structure=recent_structure,
+            volume_context=volume_context,
+            decision_context=decision_context,
         )
 
         try:
@@ -327,14 +391,43 @@ LANGUAGE: Write "reasoning" and "risk_notes" fields in Korean (한국어). Be co
         recent_orders: list[dict[str, object]] | None = None,
         recent_candles: list[dict[str, object]] | None = None,
         previous_decisions: list[dict[str, str]] | None = None,
+        btc_trend: dict[str, object] | None = None,
+        portfolio_exposure: dict[str, object] | None = None,
+        risk_context: dict[str, object] | None = None,
+        current_symbol_position: dict[str, object] | None = None,
+        recent_structure: dict[str, object] | None = None,
+        volume_context: dict[str, object] | None = None,
+        decision_context: str | None = None,
     ) -> str:
         parts = [
             f"Analyze {symbol} for trading decision.\n\nMarket Data:\n{json.dumps(market_summary, indent=2, default=str)}"
         ]
+        if decision_context:
+            parts.append(f"\nDecision Context: {decision_context}")
+        if current_symbol_position is not None:
+            parts.append(
+                f"\nCurrent Symbol Position:\n{json.dumps(current_symbol_position, indent=2, default=str)}"
+            )
+        else:
+            parts.append("\nCurrent Symbol Position: null (no position held)")
         if technical_indicators:
             parts.append(
                 f"\nTechnical Indicators:\n{json.dumps(technical_indicators, indent=2, default=str)}"
             )
+        if recent_structure:
+            parts.append(
+                f"\nRecent Price Structure:\n{json.dumps(recent_structure, indent=2, default=str)}"
+            )
+        if volume_context:
+            parts.append(f"\nVolume Context:\n{json.dumps(volume_context, indent=2, default=str)}")
+        if btc_trend:
+            parts.append(f"\nBTC Trend Filter:\n{json.dumps(btc_trend, indent=2, default=str)}")
+        if portfolio_exposure:
+            parts.append(
+                f"\nPortfolio Exposure:\n{json.dumps(portfolio_exposure, indent=2, default=str)}"
+            )
+        if risk_context:
+            parts.append(f"\nRisk Context:\n{json.dumps(risk_context, indent=2, default=str)}")
         if strategy_signals:
             parts.append(
                 f"\nStrategy Signals:\n{json.dumps(strategy_signals, indent=2, default=str)}"
