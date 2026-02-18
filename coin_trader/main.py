@@ -53,6 +53,9 @@ _btc_trend_cache: dict[str, object] = {}
 _btc_trend_cache_ts: float = 0.0
 _BTC_TREND_CACHE_TTL = 60.0
 _BTC_SYMBOL = "BTC/KRW"
+_symbol_candle_refresh_ts: dict[str, float] = {}
+_dynamic_symbols_cache: list[str] = []
+_dynamic_symbols_cache_ts: float = 0.0
 
 
 def _build_system(settings: Settings, *, install_signal_handlers: bool = False) -> dict[str, Any]:
@@ -344,9 +347,234 @@ async def _compute_btc_trend(
         return None
 
 
+def _chunk_symbols(symbols: list[str], size: int) -> list[list[str]]:
+    if size <= 0:
+        return [symbols]
+    return [symbols[i : i + size] for i in range(0, len(symbols), size)]
+
+
+async def _fetch_batch_tickers(
+    exchange_adapter: Any, symbols: list[str]
+) -> dict[str, dict[str, object]]:
+    if not symbols or not hasattr(exchange_adapter, "get_tickers"):
+        return {}
+    try:
+        raw = await exchange_adapter.get_tickers(symbols)
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _should_refresh_candles(symbol: str, settings: Settings) -> bool:
+    last = _symbol_candle_refresh_ts.get(symbol)
+    if last is None:
+        return True
+    return (time.time() - last) >= float(settings.candle_refresh_interval_sec)
+
+
+def _compute_universe_candidate_k(final_top_n: int) -> int:
+    return min(20, max(12, final_top_n * 3))
+
+
+def _safe_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
+    try:
+        if value is None:
+            return default
+        return Decimal(str(value))
+    except Exception:
+        return default
+
+
+async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
+    global _dynamic_symbols_cache, _dynamic_symbols_cache_ts
+
+    settings: Settings = components["settings"]
+    exchange_adapter = components.get("exchange_adapter")
+    broker = components.get("broker")
+
+    if not settings.dynamic_symbol_selection_enabled:
+        return list(settings.trading_symbols)
+
+    now = time.time()
+    if _dynamic_symbols_cache and now - _dynamic_symbols_cache_ts < float(
+        settings.dynamic_symbol_refresh_sec
+    ):
+        settings.trading_symbols = list(_dynamic_symbols_cache)
+        return list(_dynamic_symbols_cache)
+
+    if exchange_adapter is None or not hasattr(exchange_adapter, "get_krw_markets"):
+        return list(settings.trading_symbols)
+
+    markets_raw = await exchange_adapter.get_krw_markets()
+    markets = [m for m in markets_raw if isinstance(m, str) and m.endswith("/KRW")]
+    if not markets:
+        return list(settings.trading_symbols)
+
+    tickers: dict[str, dict[str, object]] = {}
+    batch_size = max(1, int(settings.dynamic_symbol_batch_size))
+    for chunk in _chunk_symbols(markets, batch_size):
+        part = await _fetch_batch_tickers(exchange_adapter, chunk)
+        tickers.update(part)
+
+    min_turnover = Decimal(str(settings.dynamic_symbol_min_krw_24h))
+    ranked: list[tuple[str, Decimal]] = []
+    for symbol, ticker in tickers.items():
+        turnover = Decimal(str(ticker.get("acc_trade_price_24h", 0)))
+        if turnover < min_turnover:
+            continue
+        ranked.append((symbol, turnover))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+
+    top_k = max(1, int(settings.dynamic_symbol_top_k))
+    candidate_k = _compute_universe_candidate_k(top_k)
+    ranked_candidates = ranked[:candidate_k]
+    ranked_top = [symbol for symbol, _ in ranked[:top_k]]
+
+    held_symbols: list[str] = []
+    if broker is not None and hasattr(broker, "fetch_positions"):
+        try:
+            held = await broker.fetch_positions()
+            held_symbols = [p.symbol for p in held if getattr(p, "quantity", Decimal("0")) > 0]
+        except Exception:
+            pass
+
+    always_keep = [s for s in settings.get_always_keep_symbols() if s.endswith("/KRW")]
+    forced_symbols: list[str] = []
+    for symbol in [*always_keep, *held_symbols]:
+        if symbol not in forced_symbols:
+            forced_symbols.append(symbol)
+
+    max_symbols = max(1, int(settings.dynamic_symbol_max_symbols))
+    llm_slots = max(0, max_symbols - len(forced_symbols))
+
+    def _candidate_metrics(symbol: str, ticker: dict[str, object]) -> dict[str, object]:
+        trade_price = _safe_decimal(ticker.get("trade_price", 0))
+        opening_price = _safe_decimal(ticker.get("opening_price", 0))
+        high_price = _safe_decimal(ticker.get("high_price", trade_price), trade_price)
+        low_price = _safe_decimal(ticker.get("low_price", trade_price), trade_price)
+        bid = _safe_decimal(ticker.get("highest_bid", trade_price), trade_price)
+        ask = _safe_decimal(ticker.get("lowest_ask", trade_price), trade_price)
+        change_rate = _safe_decimal(ticker.get("signed_change_rate", 0)) * Decimal("100")
+        range_pct = Decimal("0")
+        if trade_price > 0:
+            range_pct = (high_price - low_price) / trade_price * Decimal("100")
+        dist_from_high_pct = Decimal("0")
+        if high_price > 0:
+            dist_from_high_pct = (high_price - trade_price) / high_price * Decimal("100")
+        spread_bps = Decimal("0")
+        if ask > 0:
+            spread_bps = abs(ask - bid) / ask * Decimal("10000")
+        return {
+            "symbol": symbol,
+            "change_24h_pct": str(round(change_rate, 3)),
+            "intraday_range_pct": str(round(range_pct, 3)),
+            "distance_from_high_pct": str(round(dist_from_high_pct, 3)),
+            "spread_bps": str(round(spread_bps, 2)),
+            "volume_24h": str(ticker.get("acc_trade_volume_24h", 0)),
+            "price": str(trade_price),
+            "open": str(opening_price),
+        }
+
+    spread_limit = settings.dynamic_symbol_max_spread_bps
+    abs_change_limit = settings.dynamic_symbol_max_abs_change_24h_pct
+    range_limit = settings.dynamic_symbol_max_intraday_range_pct
+
+    filtered_symbols: list[str] = []
+    for symbol, _ in ranked_candidates:
+        ticker = tickers.get(symbol, {})
+        metrics = _candidate_metrics(symbol, ticker)
+        spread_bps = _safe_decimal(metrics["spread_bps"])
+        abs_change = abs(_safe_decimal(metrics["change_24h_pct"]))
+        intraday_range = _safe_decimal(metrics["intraday_range_pct"])
+        if spread_bps > spread_limit:
+            continue
+        if abs_change > abs_change_limit:
+            continue
+        if intraday_range > range_limit:
+            continue
+        filtered_symbols.append(symbol)
+
+    llm_rank_base = [
+        symbol
+        for symbol, _ in ranked_candidates
+        if symbol in filtered_symbols and symbol not in forced_symbols
+    ]
+    if not llm_rank_base:
+        llm_rank_base = [s for s in ranked_top if s not in forced_symbols]
+
+    candidate_payload: list[dict[str, object]] = []
+    for symbol in llm_rank_base[:candidate_k]:
+        ticker = tickers.get(symbol, {})
+        payload = _candidate_metrics(symbol, ticker)
+        payload["turnover_24h_krw"] = str(_safe_decimal(ticker.get("acc_trade_price_24h", 0)))
+        payload["is_held"] = symbol in held_symbols
+        payload["was_active"] = symbol in _dynamic_symbols_cache
+        candidate_payload.append(payload)
+
+    active_non_core = [
+        s for s in _dynamic_symbols_cache if s not in forced_symbols and s in tickers
+    ]
+    active_payload = [_candidate_metrics(s, tickers[s]) for s in active_non_core]
+
+    llm_decision: Any | None = None
+    llm_advisor = components.get("llm_advisor")
+    if (
+        llm_slots > 0
+        and llm_advisor is not None
+        and hasattr(llm_advisor, "get_symbol_universe")
+        and candidate_payload
+    ):
+        try:
+            llm_decision = await llm_advisor.get_symbol_universe(
+                top_n=llm_slots,
+                candidates=candidate_payload,
+                active_symbols=active_payload,
+                held_symbols=held_symbols,
+                core_symbols=forced_symbols,
+            )
+        except Exception:
+            pass
+
+    selected: list[str] = list(forced_symbols)
+    dynamic_source = llm_decision.selected_symbols if llm_decision else llm_rank_base
+    for symbol in dynamic_source:
+        if symbol in selected:
+            continue
+        selected.append(symbol)
+        if len(selected) >= max_symbols:
+            break
+
+    log_event(
+        "symbol_decision",
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "top_n": top_k,
+            "candidate_k": candidate_k,
+            "raw_ranked_count": len(ranked_candidates),
+            "filtered_count": len(llm_rank_base),
+            "llm_used": llm_decision is not None,
+            "forced_symbols": forced_symbols,
+            "active_symbols_before": _dynamic_symbols_cache,
+            "llm_selected_symbols": llm_decision.selected_symbols if llm_decision else [],
+            "llm_reasoning": llm_decision.reasoning if llm_decision else "",
+            "llm_prompt": llm_decision.prompt if llm_decision else "",
+            "selected_symbols": selected,
+        },
+    )
+
+    if not selected:
+        selected = list(settings.trading_symbols)
+
+    _dynamic_symbols_cache = selected
+    _dynamic_symbols_cache_ts = now
+    settings.trading_symbols = list(selected)
+    return selected
+
+
 async def _run_tick(
     components: dict[str, Any],
     symbol: str,
+    prefetched_ticker: dict[str, object] | None = None,
 ) -> None:
     engine: ExecutionEngine = components["engine"]
     strategy = components["strategy"]
@@ -363,24 +591,28 @@ async def _run_tick(
         return
 
     # 1. Fetch market data
-    try:
-        ticker = await exchange_adapter.get_ticker(symbol)
-        anomaly_monitor.record_api_success()
-    except Exception as e:
-        err_text = str(e)
-        if "429" in err_text or "Too Many Requests" in err_text:
-            logger.warning("upbit_rate_limited", symbol=symbol, error=err_text)
+    ticker = prefetched_ticker
+    if ticker is None:
+        try:
+            ticker = await exchange_adapter.get_ticker(symbol)
+            anomaly_monitor.record_api_success()
+        except Exception as e:
+            err_text = str(e)
+            if "429" in err_text or "Too Many Requests" in err_text:
+                logger.warning("upbit_rate_limited", symbol=symbol, error=err_text)
+                return
+            event = anomaly_monitor.record_api_failure()
+            if event:
+                logger.error("api_failure_threshold", symbol=symbol, error=str(e))
+                store.save_safety_event(event)
+                kill_switch.activate(f"API failure threshold reached: {e}")
+                if notifier:
+                    await notifier.send_alert(
+                        "API Failure", f"Consecutive API failures on {symbol}", "critical"
+                    )
             return
-        event = anomaly_monitor.record_api_failure()
-        if event:
-            logger.error("api_failure_threshold", symbol=symbol, error=str(e))
-            store.save_safety_event(event)
-            kill_switch.activate(f"API failure threshold reached: {e}")
-            if notifier:
-                await notifier.send_alert(
-                    "API Failure", f"Consecutive API failures on {symbol}", "critical"
-                )
-        return
+    else:
+        anomaly_monitor.record_api_success()
 
     now = datetime.now(timezone.utc)
     trade_price = Decimal(str(ticker.get("trade_price", 0)))
@@ -420,11 +652,14 @@ async def _run_tick(
                 )
             return
 
-    try:
-        candles = await exchange_adapter.get_candles(symbol, interval="minutes/60", count=200)
-        strategy.update_candles(symbol, candles)
-    except Exception:
-        pass
+    candles = strategy._candle_history.get(symbol, [])
+    if not candles or _should_refresh_candles(symbol, settings):
+        try:
+            candles = await exchange_adapter.get_candles(symbol, interval="minutes/60", count=200)
+            strategy.update_candles(symbol, candles)
+            _symbol_candle_refresh_ts[symbol] = time.time()
+        except Exception:
+            pass
 
     # 5. Run strategy
     signals = await strategy.on_tick(md)
@@ -918,9 +1153,16 @@ async def _main_loop(settings: Settings, once: bool = False) -> None:
             except Exception as e:
                 logger.error("order_sync_error", error=str(e))
 
-            for symbol in settings.trading_symbols:
+            active_symbols = await _refresh_dynamic_symbols(components)
+            batched_tickers = await _fetch_batch_tickers(
+                exchange_adapter=components["exchange_adapter"], symbols=active_symbols
+            )
+
+            for symbol in active_symbols:
                 try:
-                    await _run_tick(components, symbol)
+                    await _run_tick(
+                        components, symbol, prefetched_ticker=batched_tickers.get(symbol)
+                    )
                 except Exception as e:
                     logger.error("tick_error", symbol=symbol, error=str(e))
 

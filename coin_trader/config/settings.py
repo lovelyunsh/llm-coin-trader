@@ -36,7 +36,7 @@ class RiskLimits:
     """Hardcoded risk limits - IMMUTABLE at runtime"""
 
     max_position_size_pct: Decimal = Decimal("10")
-    max_positions: int = 5
+    max_positions: int = 10
     daily_max_drawdown_pct: Decimal = Decimal("5")
     soft_stop_loss_pct: Decimal = Decimal("5")
     stop_loss_pct: Decimal = Decimal("10")
@@ -99,6 +99,18 @@ class Settings(BaseSettings):
     # Data
     db_path: Path = Field(default=Path("data/coin_trader.db"))
     market_data_interval_sec: int = Field(default=60)
+    candle_refresh_interval_sec: int = Field(default=3600)
+
+    dynamic_symbol_selection_enabled: bool = Field(default=True)
+    dynamic_symbol_refresh_sec: int = Field(default=3600)
+    dynamic_symbol_top_k: int = Field(default=5)
+    dynamic_symbol_max_symbols: int = Field(default=10)
+    dynamic_symbol_min_krw_24h: int = Field(default=1_000_000_000)
+    dynamic_symbol_batch_size: int = Field(default=80)
+    dynamic_symbol_max_spread_bps: Decimal = Field(default=Decimal("80"))
+    dynamic_symbol_max_abs_change_24h_pct: Decimal = Field(default=Decimal("20"))
+    dynamic_symbol_max_intraday_range_pct: Decimal = Field(default=Decimal("30"))
+    always_keep_symbols: str = Field(default="")
 
     # Logging
     log_level: str = Field(default="INFO")
@@ -141,6 +153,16 @@ class Settings(BaseSettings):
             return "ARMED" in token_content
         except Exception:
             return False  # fail closed
+
+    def get_always_keep_symbols(self) -> list[str]:
+        parts = [p.strip().upper() for p in self.always_keep_symbols.split(",") if p.strip()]
+        out: list[str] = []
+        for symbol in parts:
+            if "/" not in symbol:
+                continue
+            if symbol not in out:
+                out.append(symbol)
+        return out
 
     @classmethod
     def load_safe(cls) -> "Settings":

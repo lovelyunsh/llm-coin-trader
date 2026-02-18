@@ -96,6 +96,13 @@ class LLMAdvice:
         )
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class LLMUniverseDecision:
+    selected_symbols: list[str]
+    reasoning: str = ""
+    prompt: str = ""
+
+
 class LLMAdvisor:
     """LLM-based advisory - produces bounded suggestions, never orders."""
 
@@ -153,6 +160,22 @@ GUIDELINES:
 - For add_position: be stricter than new_entry — only add if conviction is higher than initial entry.
 
 LANGUAGE: Write "reasoning" and "risk_notes" in Korean (한국어). Be concise and natural."""
+
+    UNIVERSE_SYSTEM_PROMPT: str = """You select tradable symbols for a KRW crypto bot.
+
+You receive a candidate list with per-symbol metrics. Your task is portfolio construction, not trade entry timing.
+
+Selection rules:
+- Return exactly top_n symbols unless candidates are fewer.
+- Prefer liquid symbols with healthy trend/momentum and acceptable spread.
+- Avoid overheated one-candle spikes and thin/erratic symbols.
+- Keep diversity; do not cluster all picks into one very correlated micro-theme.
+- Existing held symbols should be respected unless quality is clearly weak.
+
+Output JSON fields:
+- selected_symbols: array of symbol strings (e.g. ["XRP/KRW", "SOL/KRW"])
+- reasoning: concise Korean explanation (max 300 chars)
+"""
 
     def __init__(
         self,
@@ -285,6 +308,161 @@ LANGUAGE: Write "reasoning" and "risk_notes" in Korean (한국어). Be concise a
         except Exception as e:
             logger.error("llm_error error=%s symbol=%s mode=%s", str(e), symbol, self._auth_mode)
             return None
+
+    async def get_symbol_universe(
+        self,
+        *,
+        top_n: int,
+        candidates: list[dict[str, object]],
+        active_symbols: list[dict[str, object]] | None = None,
+        held_symbols: list[str] | None = None,
+        core_symbols: list[str] | None = None,
+    ) -> LLMUniverseDecision | None:
+        if self._auth_mode == "api_key" and not self._api_key:
+            return None
+        if top_n <= 0 or not candidates:
+            return LLMUniverseDecision(selected_symbols=[])
+
+        user_prompt = self._build_universe_prompt(
+            top_n=top_n,
+            candidates=candidates,
+            active_symbols=active_symbols or [],
+            held_symbols=held_symbols or [],
+            core_symbols=core_symbols or [],
+        )
+
+        try:
+            async with self._rate_lock:
+                now = time.time()
+                delay = self._min_interval - (now - self._last_call_ts)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                if self._auth_mode == "oauth":
+                    response = await self._call_oauth_universe(user_prompt)
+                elif self._provider == "anthropic":
+                    response = await self._call_anthropic_universe(user_prompt)
+                else:
+                    response = await self._call_openai_universe(user_prompt)
+                self._last_call_ts = time.time()
+
+            if response is None:
+                return None
+
+            parsed = self._parse_universe_response(response)
+            if parsed is None or not parsed.selected_symbols:
+                return None
+
+            candidate_symbols = {
+                str(item.get("symbol", "")).upper()
+                for item in candidates
+                if isinstance(item.get("symbol"), str)
+            }
+            filtered = [s for s in parsed.selected_symbols if s in candidate_symbols]
+            if not filtered:
+                return None
+
+            return LLMUniverseDecision(
+                selected_symbols=filtered[:top_n],
+                reasoning=parsed.reasoning,
+                prompt=user_prompt,
+            )
+        except Exception as e:
+            logger.error("llm_universe_error error=%s", str(e))
+            return None
+
+    async def _call_openai_universe(self, user_prompt: str) -> str | None:
+        body = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self.UNIVERSE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 600,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        data = await self._post_json(f"{self._base_url}/chat/completions", body, headers)
+        if data is None:
+            return None
+        choices_obj = data.get("choices")
+        if not isinstance(choices_obj, list) or not choices_obj:
+            return None
+        choice0 = choices_obj[0]
+        if not isinstance(choice0, dict):
+            return None
+        msg_obj = choice0.get("message")
+        if not isinstance(msg_obj, dict):
+            return None
+        content = msg_obj.get("content")
+        return str(content) if content is not None else None
+
+    async def _call_anthropic_universe(self, user_prompt: str) -> str | None:
+        headers = {
+            "x-api-key": self._api_key,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+        body = {
+            "model": self._model,
+            "system": self.UNIVERSE_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "temperature": 0.2,
+            "max_tokens": 600,
+        }
+        data = await self._post_json(f"{self._base_url}/messages", body, headers)
+        if data is None:
+            return None
+        content_obj = data.get("content")
+        if not isinstance(content_obj, list) or not content_obj:
+            return None
+        item0 = content_obj[0]
+        if not isinstance(item0, dict):
+            return None
+        text = item0.get("text")
+        return str(text) if text is not None else None
+
+    async def _call_oauth_universe(self, user_prompt: str) -> str | None:
+        try:
+            from coin_trader.llm.oauth_openai import get_reusable_auth, normalize_model
+            from coin_trader.llm.codex_client import query_codex
+        except ImportError as e:
+            logger.error("oauth_import_error error=%s", str(e))
+            return None
+
+        auth_file = self._oauth_auth_file or Path("data/.auth/openai-oauth.json")
+        try:
+            auth = await asyncio.to_thread(
+                get_reusable_auth,
+                auth_file=auth_file,
+                force_login=self._oauth_force_login,
+                open_browser=self._oauth_open_browser,
+            )
+        except Exception as e:
+            logger.error("oauth_auth_error error=%s", str(e))
+            return None
+
+        if not auth.access or not auth.account_id:
+            logger.error("oauth_missing_credentials")
+            return None
+
+        try:
+            model = normalize_model(self._model)
+        except ValueError as e:
+            logger.error("oauth_model_error error=%s", str(e))
+            return None
+
+        return await query_codex(
+            access_token=auth.access,
+            account_id=auth.account_id,
+            model=model,
+            system_prompt=self.UNIVERSE_SYSTEM_PROMPT,
+            user_message=user_prompt,
+            timeout=self._timeout,
+        )
 
     async def _call_oauth_codex(self, user_prompt: str) -> str | None:
         try:
@@ -463,6 +641,58 @@ LANGUAGE: Write "reasoning" and "risk_notes" in Korean (한국어). Be concise a
             if not isinstance(data_obj, dict):
                 return None
             return LLMAdvice.from_mapping(cast(dict[str, object], data_obj))
+        except Exception:
+            return None
+
+    def _build_universe_prompt(
+        self,
+        *,
+        top_n: int,
+        candidates: list[dict[str, object]],
+        active_symbols: list[dict[str, object]],
+        held_symbols: list[str],
+        core_symbols: list[str],
+    ) -> str:
+        parts = [
+            "Select tradable symbols for the next refresh window.",
+            f"top_n={top_n}",
+            f"held_symbols={json.dumps(held_symbols, ensure_ascii=False)}",
+            f"core_symbols={json.dumps(core_symbols, ensure_ascii=False)}",
+            f"active_symbols={json.dumps(active_symbols, ensure_ascii=False)}",
+            f"candidates={json.dumps(candidates, ensure_ascii=False)}",
+            "Return JSON only.",
+        ]
+        return "\n".join(parts)
+
+    def _parse_universe_response(self, text: str) -> LLMUniverseDecision | None:
+        try:
+            text = text.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
+            data_obj: object = json.loads(text)
+            if not isinstance(data_obj, dict):
+                return None
+            arr = data_obj.get("selected_symbols")
+            if not isinstance(arr, list):
+                return None
+
+            out: list[str] = []
+            for item in arr:
+                if not isinstance(item, str):
+                    continue
+                symbol = item.upper().strip()
+                if not symbol or "/" not in symbol:
+                    continue
+                if symbol not in out:
+                    out.append(symbol)
+            reasoning_raw = data_obj.get("reasoning")
+            reasoning = str(reasoning_raw).strip() if reasoning_raw is not None else ""
+            if len(reasoning) > 300:
+                reasoning = reasoning[:300]
+            return LLMUniverseDecision(selected_symbols=out, reasoning=reasoning)
         except Exception:
             return None
 

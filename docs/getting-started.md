@@ -66,7 +66,22 @@ EXCHANGE=upbit
 TRADING_SYMBOLS=["BTC/KRW","ETH/KRW","XRP/KRW","ADA/KRW","SOL/KRW"]
 
 # 틱 간격 (초)
-MARKET_DATA_INTERVAL_SEC=30
+MARKET_DATA_INTERVAL_SEC=60
+
+# 캔들 갱신 주기 (초)
+CANDLE_REFRESH_INTERVAL_SEC=3600
+
+# 동적 심볼 유니버스
+DYNAMIC_SYMBOL_SELECTION_ENABLED=true
+DYNAMIC_SYMBOL_REFRESH_SEC=3600
+DYNAMIC_SYMBOL_TOP_K=5
+DYNAMIC_SYMBOL_MAX_SYMBOLS=10
+DYNAMIC_SYMBOL_MIN_KRW_24H=1000000000
+DYNAMIC_SYMBOL_BATCH_SIZE=80
+DYNAMIC_SYMBOL_MAX_SPREAD_BPS=80
+DYNAMIC_SYMBOL_MAX_ABS_CHANGE_24H_PCT=20
+DYNAMIC_SYMBOL_MAX_INTRADAY_RANGE_PCT=30
+ALWAYS_KEEP_SYMBOLS=BTC/KRW,ETH/KRW
 
 # 웹 대시보드 마스터 코드 (로그인에 사용)
 WEB_MASTER_CODE=your-master-code-here
@@ -249,11 +264,12 @@ docker run -d --name coin-trader -p 8932:8932 \
 | 보유 포지션 | 심볼, 수량, 평균진입가, 현재가, 평가금액, 미실현손익, 미실현손익률, 전량매도 버튼 |
 | 수동 매수 | 심볼 선택 + KRW 금액 입력 |
 | AI 판단 로그 | 코인별 필터, 10개씩 페이지네이션, reasoning 모달 팝업 |
-| 프롬프트 확인 | AI 판단 로그의 "P" 버튼 클릭 |
+| AI 심볼 판단 로그 | 10개씩 페이지네이션, LLM 사유 클릭 모달, "P" 버튼으로 심볼 선발 프롬프트 확인 |
+| 프롬프트 확인 | AI 판단 로그/AI 심볼 판단 로그의 "P" 버튼 클릭 |
 | 전체 주문내역 | 10개씩 페이지네이션 |
 
 자동 갱신 주기:
-- 10초: 상태, 잔고, 포지션, 손익, 미체결 주문
+- 15초: 상태, 잔고, 포지션, 손익, 미체결 주문
 - 30초: 전체 주문, 안전 이벤트, AI 결정
 
 ---
@@ -350,6 +366,7 @@ logs/
 ├── decisions_xrp_krw.jsonl   # XRP AI 결정
 ├── decisions_ada_krw.jsonl   # ADA AI 결정
 ├── decisions_sol_krw.jsonl   # SOL AI 결정
+├── symbol_decisions.jsonl    # AI 심볼 유니버스 선발 로그
 ├── orders.jsonl              # 주문 생성/체결
 ├── safety.jsonl              # 안전 이벤트
 └── general.jsonl             # 기타 이벤트

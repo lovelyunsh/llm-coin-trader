@@ -985,6 +985,31 @@
                 </table>
                 <div class="pagination" id="decisionsPagination"></div>
             </div>
+
+            <div class="card table-container">
+                <h2 class="card-title">AI 심볼 판단 로그</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>시간</th>
+                            <th>Top N</th>
+                            <th>후보 K</th>
+                            <th>필터통과</th>
+                            <th>강제유지</th>
+                            <th>LLM 사용</th>
+                            <th>LLM 사유</th>
+                            <th>프롬프트</th>
+                            <th>최종 선택 심볼</th>
+                        </tr>
+                    </thead>
+                    <tbody id="symbolDecisionsTable">
+                        <tr>
+                            <td colspan="9" class="empty-state">AI 심볼 판단 내역이 없습니다</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="symbolDecisionsPagination"></div>
+            </div>
         </div>
     </main>
 
@@ -1000,6 +1025,8 @@
         let _ordersData = [];
         let _decisionsPage = 0;
         let _decisionsData = [];
+        let _symbolDecisionsPage = 0;
+        let _symbolDecisionsData = [];
 
         function renderPagination(containerId, currentPage, totalItems, onPageChange) {
             const container = document.getElementById(containerId);
@@ -1471,6 +1498,65 @@
 
         function goDecisionsPage(page) { renderDecisionsPage(page); }
 
+        async function updateSymbolDecisions() {
+            try {
+                const data = await fetchAPI('/api/symbol-decisions');
+                _symbolDecisionsData = data.symbol_decisions || [];
+                renderSymbolDecisionsPage(_symbolDecisionsPage);
+            } catch (error) {
+                console.error('Failed to update symbol decisions:', error);
+            }
+        }
+
+        function renderSymbolDecisionsPage(page) {
+            const tbody = document.getElementById('symbolDecisionsTable');
+            if (_symbolDecisionsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">AI 심볼 판단 내역이 없습니다</td></tr>';
+                document.getElementById('symbolDecisionsPagination').innerHTML = '';
+                return;
+            }
+
+            const totalPages = Math.ceil(_symbolDecisionsData.length / PAGE_SIZE);
+            if (page >= totalPages) page = totalPages - 1;
+            if (page < 0) page = 0;
+            _symbolDecisionsPage = page;
+
+            const slice = _symbolDecisionsData.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+            tbody.innerHTML = slice.map(row => {
+                const forced = Array.isArray(row.forced_symbols) ? row.forced_symbols.join(', ') : '-';
+                const selected = Array.isArray(row.selected_symbols) ? row.selected_symbols.join(', ') : '-';
+                const llmUsed = row.llm_used ? '<span class="badge badge-success">YES</span>' : '<span class="badge badge-warning">NO</span>';
+                const reasoning = row.llm_reasoning || '-';
+                const reasoningShort = reasoning.length > 48 ? reasoning.substring(0, 48) + '...' : reasoning;
+                const reasoningEscaped = reasoning.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+                const hasReasoning = reasoning && reasoning !== '-';
+                const prompt = row.llm_prompt || '';
+                const promptEscaped = prompt.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+                const promptBtn = prompt
+                    ? `<button class="btn-prompt" onclick="showPrompt('UNIVERSE', '${formatTimestamp(row.ts)}', this)" data-prompt="${promptEscaped}">P</button>`
+                    : '-';
+                return `
+                    <tr>
+                        <td>${formatTimestamp(row.ts)}</td>
+                        <td>${row.top_n ?? '-'}</td>
+                        <td>${row.candidate_k ?? '-'}</td>
+                        <td>${row.filtered_count ?? '-'}</td>
+                        <td>${forced}</td>
+                        <td>${llmUsed}</td>
+                        <td>
+                            <span class="${hasReasoning ? 'reasoning-cell' : ''}" ${hasReasoning ? `onclick="showReasoning('UNIVERSE', 'SYMBOL_SELECT', '-', '${formatTimestamp(row.ts)}', this)" data-reasoning="${reasoningEscaped}"` : ''}>${reasoningShort}</span>
+                        </td>
+                        <td>${promptBtn}</td>
+                        <td>${selected}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            renderPagination('symbolDecisionsPagination', page, _symbolDecisionsData.length, 'goSymbolDecisionsPage');
+        }
+
+        function goSymbolDecisionsPage(page) { renderSymbolDecisionsPage(page); }
+
         function showReasoning(symbol, llmAction, confidence, timestamp, el) {
             const reasoning = el.getAttribute('data-reasoning');
             if (!reasoning || reasoning === '-') return;
@@ -1682,7 +1768,8 @@
             await Promise.all([
                 updateOrders(),
                 updateSafetyEvents(),
-                updateDecisions()
+                updateDecisions(),
+                updateSymbolDecisions()
             ]);
         }
 
@@ -1700,7 +1787,8 @@
                     updateOpenOrders(),
                     updateOrders(),
                     updateSafetyEvents(),
-                    updateDecisions()
+                    updateDecisions(),
+                    updateSymbolDecisions()
                 ]);
                 
                 // Start refresh intervals
