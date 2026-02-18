@@ -83,7 +83,11 @@ def _build_system(settings: Settings, *, install_signal_handlers: bool = False) 
 
             from coin_trader.broker.live import LiveBroker
 
-            broker = LiveBroker(exchange=ExchangeName.UPBIT, exchange_adapter=exchange_adapter)
+            broker = LiveBroker(
+                exchange=ExchangeName.UPBIT,
+                exchange_adapter=exchange_adapter,
+                trading_symbols=settings.trading_symbols,
+            )
             logger.warning("live_mode_active", exchange="upbit")
         else:
             from coin_trader.exchange.upbit import UpbitAdapter
@@ -509,6 +513,7 @@ async def _run_tick(
                 "llm_confidence": str(advice.confidence) if advice else "0",
                 "llm_reasoning": advice.reasoning if advice else "",
                 "llm_risk_notes": advice.risk_notes if advice else "",
+                "llm_prompt": advice._prompt if advice else "",
                 "price": str(trade_price),
             },
         )

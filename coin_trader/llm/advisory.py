@@ -32,6 +32,7 @@ class LLMAdvice:
     confidence: Decimal
     reasoning: str
     risk_notes: str = ""
+    _prompt: str = ""
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> "LLMAdvice | None":
@@ -214,6 +215,8 @@ LANGUAGE: Write "reasoning" and "risk_notes" fields in Korean (한국어). Be co
                 self._auth_mode,
             )
 
+            if advice is not None:
+                object.__setattr__(advice, "_prompt", user_prompt)
             return advice
         except Exception as e:
             logger.error("llm_error error=%s symbol=%s mode=%s", str(e), symbol, self._auth_mode)
