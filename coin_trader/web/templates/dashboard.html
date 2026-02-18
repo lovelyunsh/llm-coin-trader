@@ -1,0 +1,1664 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>코인 자동거래 시스템</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-secondary: #131824;
+            --bg-card: #1a1f2e;
+            --bg-card-hover: #1f2533;
+            --border-color: #2a3142;
+            --text-primary: #e8eaed;
+            --text-secondary: #9aa0b3;
+            --text-muted: #6b7280;
+            --accent-primary: #3b82f6;
+            --accent-secondary: #8b5cf6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --info: #06b6d4;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, #0f1419 100%);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding-bottom: 2rem;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+
+        /* Header */
+        .header {
+            background: rgba(26, 31, 46, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border-color);
+            padding: 1.5rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.02em;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-card);
+            border-radius: 2rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--success);
+            box-shadow: 0 0 10px var(--success);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-dot.disconnected {
+            background: var(--danger);
+            box-shadow: 0 0 10px var(--danger);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Grid Layout */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            background: var(--bg-card-hover);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 1.25rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .card-title::before {
+            content: '';
+            width: 4px;
+            height: 1.25rem;
+            background: linear-gradient(180deg, var(--accent-primary), var(--accent-secondary));
+            border-radius: 2px;
+        }
+
+        /* Status Panel */
+        .status-panel {
+            grid-column: span 12;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .status-item {
+            background: var(--bg-secondary);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .status-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .status-value {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Control Panel */
+        .control-panel {
+            grid-column: span 12;
+        }
+
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        .btn {
+            padding: 1rem 1.5rem;
+            border: none;
+            border-radius: 0.75rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+            font-family: inherit;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            color: white;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+
+        .btn-success:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+            box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+        }
+
+        .btn-warning {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: white;
+            box-shadow: 0 4px 15px rgba(245, 158, 11, 0.3);
+        }
+
+        .btn-warning:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(245, 158, 11, 0.4);
+        }
+
+        .btn.loading::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            margin: -10px 0 0 -10px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .kill-switch-container {
+            grid-column: span 12;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .kill-switch-btn {
+            padding: 1.5rem;
+            font-size: 1.25rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        /* P&L Panel */
+        .pnl-panel {
+            grid-column: span 12;
+        }
+
+        .pnl-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        .pnl-item {
+            background: var(--bg-secondary);
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .pnl-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .pnl-value {
+            font-size: 2rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .pnl-value.positive {
+            color: var(--success);
+        }
+
+        .pnl-value.negative {
+            color: var(--danger);
+        }
+
+        /* Balances */
+        .balances-panel {
+            grid-column: span 6;
+        }
+
+        .balances-grid {
+            display: grid;
+            gap: 0.75rem;
+        }
+
+        .balance-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg-secondary);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .balance-currency {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .balance-amount {
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-secondary);
+        }
+
+        /* Tables */
+        .table-container {
+            grid-column: span 12;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+
+        thead {
+            background: var(--bg-secondary);
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        th {
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            font-variant-numeric: tabular-nums;
+        }
+
+        tbody tr {
+            transition: background 0.2s ease;
+        }
+
+        tbody tr:hover {
+            background: var(--bg-secondary);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .badge-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success);
+            border: 1px solid var(--success);
+        }
+
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+            border: 1px solid var(--danger);
+        }
+
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+            border: 1px solid var(--warning);
+        }
+
+        .badge-info {
+            background: rgba(6, 182, 212, 0.2);
+            color: var(--info);
+            border: 1px solid var(--info);
+        }
+
+        .badge-secondary {
+            background: rgba(154, 160, 179, 0.2);
+            color: var(--text-secondary);
+            border: 1px solid var(--text-secondary);
+        }
+
+        .text-success {
+            color: var(--success);
+            font-weight: 600;
+        }
+
+        .text-danger {
+            color: var(--danger);
+            font-weight: 600;
+        }
+
+        .text-warning {
+            color: var(--warning);
+            font-weight: 600;
+        }
+
+        .text-muted {
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+        }
+
+        .manual-input {
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 1rem;
+            font-family: inherit;
+            transition: all 0.2s ease;
+        }
+
+        .manual-input:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .manual-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .btn-sell {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-sell:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .balances-panel {
+                grid-column: span 12;
+            }
+
+            .header h1 {
+                font-size: 1.25rem;
+            }
+
+            .pnl-value {
+                font-size: 1.5rem;
+            }
+
+            table {
+                font-size: 0.75rem;
+            }
+
+            th, td {
+                padding: 0.75rem 0.5rem;
+            }
+        }
+
+        /* Reasoning modal */
+.reasoning-modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 2000;
+    justify-content: center;
+    align-items: center;
+}
+.reasoning-modal-overlay.active {
+    display: flex;
+}
+.reasoning-modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.5rem;
+    max-width: 600px;
+    width: 90%;
+    max-height: 70vh;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.reasoning-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+}
+.reasoning-modal-header h3 {
+    font-size: 1rem;
+    color: var(--text-primary);
+}
+.reasoning-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0 0.25rem;
+    line-height: 1;
+}
+.reasoning-modal-close:hover {
+    color: var(--text-primary);
+}
+.reasoning-modal-meta {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+.reasoning-modal-meta span {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+}
+.reasoning-modal-body {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.8;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-y: auto;
+    max-height: 50vh;
+}
+.reasoning-cell {
+    cursor: pointer;
+    color: var(--accent-primary);
+    transition: color 0.15s;
+}
+.reasoning-cell:hover {
+    color: var(--info);
+    text-decoration: underline;
+}
+
+/* Loading overlay */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 14, 26, 0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .loading-overlay.active {
+            opacity: 1;
+            pointer-events: all;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(59, 130, 246, 0.3);
+            border-top-color: var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        .decision-filters {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .decision-filter-btn {
+            padding: 0.375rem 0.875rem;
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+
+        .decision-filter-btn:hover {
+            border-color: var(--accent-primary);
+            color: var(--text-primary);
+        }
+
+        .decision-filter-btn.active {
+            background: var(--accent-primary);
+            color: white;
+            border-color: var(--accent-primary);
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .pagination-btn {
+            padding: 0.5rem 0.875rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+
+        .pagination-btn:hover:not(:disabled) {
+            border-color: var(--accent-primary);
+            color: var(--text-primary);
+        }
+
+        .pagination-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        .pagination-btn.active {
+            background: var(--accent-primary);
+            color: white;
+            border-color: var(--accent-primary);
+        }
+
+        .pagination-info {
+            font-size: 0.8125rem;
+            color: var(--text-muted);
+            margin: 0 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="reasoning-modal-overlay" id="reasoningModal" onclick="closeReasoningModal(event)">
+        <div class="reasoning-modal" onclick="event.stopPropagation()">
+            <div class="reasoning-modal-header">
+                <h3>LLM 판단 사유</h3>
+                <button class="reasoning-modal-close" onclick="closeReasoningModal()">&times;</button>
+            </div>
+            <div class="reasoning-modal-meta" id="reasoningMeta"></div>
+            <div class="reasoning-modal-body" id="reasoningBody"></div>
+        </div>
+    </div>
+
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+    </div>
+
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1>코인 자동거래 시스템</h1>
+                <div class="connection-status">
+                    <div class="status-dot" id="connectionDot"></div>
+                    <span id="connectionText">연결됨</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <div class="dashboard-grid">
+            <!-- Status Panel -->
+            <div class="card status-panel">
+                <h2 class="card-title">시스템 상태</h2>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <div class="status-label">거래 모드</div>
+                        <div class="status-value" id="tradingMode">-</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">킬 스위치</div>
+                        <div class="status-value" id="killSwitchStatus">-</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">가동 시간</div>
+                        <div class="status-value" id="uptime">-</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">거래소</div>
+                        <div class="status-value" id="exchange">-</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">거래 심볼</div>
+                        <div class="status-value" id="symbols">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Control Panel -->
+            <div class="card control-panel">
+                <h2 class="card-title">거래 제어</h2>
+                <div class="controls-grid">
+                    <button class="btn btn-primary" id="btnStartPaper">모의투자 시작</button>
+                    <button class="btn btn-success" id="btnStartLive">실거래 시작</button>
+                    <button class="btn btn-warning" id="btnStop">거래 중지</button>
+                </div>
+            </div>
+
+            <!-- Manual Buy -->
+            <div class="card control-panel">
+                <h2 class="card-title">수동 매수</h2>
+                <div class="controls-grid">
+                    <select id="buySymbol" class="manual-input">
+                        <option value="">심볼 선택</option>
+                    </select>
+                    <input type="number" id="buyAmount" class="manual-input" placeholder="금액 (KRW)" min="1000" step="1000">
+                    <button class="btn btn-success" id="btnManualBuy">매수</button>
+                </div>
+            </div>
+
+            <!-- Kill Switch -->
+            <div class="card kill-switch-container">
+                <h2 class="card-title">긴급 정지</h2>
+                <button class="btn btn-danger kill-switch-btn" id="btnKillActivate">킬 스위치 활성화</button>
+                <button class="btn btn-success kill-switch-btn" id="btnKillDeactivate" style="display: none;">킬 스위치 해제</button>
+            </div>
+
+            <!-- P&L Summary -->
+            <div class="card pnl-panel">
+                <h2 class="card-title">손익 현황</h2>
+                <div class="pnl-grid">
+                    <div class="pnl-item">
+                        <div class="pnl-label">총 자산 (KRW)</div>
+                        <div class="pnl-value" id="totalValue">0</div>
+                    </div>
+                    <div class="pnl-item">
+                        <div class="pnl-label">총 손익 (KRW)</div>
+                        <div class="pnl-value" id="totalPnl">0</div>
+                    </div>
+                    <div class="pnl-item">
+                        <div class="pnl-label">총 손익률 (%)</div>
+                        <div class="pnl-value" id="totalPnlPct">0.00%</div>
+                    </div>
+                    <div class="pnl-item">
+                        <div class="pnl-label">초기 잔고 (KRW)</div>
+                        <div class="pnl-value" id="initialBalance">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Balances -->
+            <div class="card balances-panel">
+                <h2 class="card-title">보유 자산</h2>
+                <div class="balances-grid" id="balancesGrid">
+                    <div class="empty-state">데이터 로딩 중...</div>
+                </div>
+            </div>
+
+            <!-- Positions -->
+            <div class="card table-container">
+                <h2 class="card-title">보유 포지션</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>심볼</th>
+                            <th>수량</th>
+                            <th>평균 진입가</th>
+                            <th>현재가</th>
+                            <th>평가금액</th>
+                            <th>미실현 손익</th>
+                            <th>미실현 손익률</th>
+                            <th>작업</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positionsTable">
+                        <tr>
+                            <td colspan="8" class="empty-state">포지션이 없습니다</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Open Orders -->
+            <div class="card table-container">
+                <h2 class="card-title">미체결 주문</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>주문 ID</th>
+                            <th>심볼</th>
+                            <th>방향</th>
+                            <th>타입</th>
+                            <th>수량</th>
+                            <th>가격</th>
+                            <th>상태</th>
+                            <th>생성 시간</th>
+                        </tr>
+                    </thead>
+                    <tbody id="openOrdersTable">
+                        <tr>
+                            <td colspan="8" class="empty-state">미체결 주문이 없습니다</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- All Orders -->
+            <div class="card table-container">
+                <h2 class="card-title">전체 주문 내역</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>주문 ID</th>
+                            <th>심볼</th>
+                            <th>방향</th>
+                            <th>타입</th>
+                            <th>수량</th>
+                            <th>가격</th>
+                            <th>상태</th>
+                            <th>생성 시간</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ordersTable">
+                        <tr>
+                            <td colspan="8" class="empty-state">주문 내역이 없습니다</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="ordersPagination"></div>
+            </div>
+
+            <!-- Safety Events -->
+            <div class="card table-container">
+                <h2 class="card-title">안전 이벤트</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>이벤트 타입</th>
+                            <th>심각도</th>
+                            <th>설명</th>
+                            <th>발생 시간</th>
+                        </tr>
+                    </thead>
+                    <tbody id="safetyEventsTable">
+                        <tr>
+                            <td colspan="4" class="empty-state">안전 이벤트가 없습니다</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="card table-container">
+                <h2 class="card-title">AI 판단 로그</h2>
+                <div class="decision-filters" id="decisionFilters">
+                    <button class="decision-filter-btn active" onclick="setDecisionsFilter(null)">전체</button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>시간</th>
+                            <th>심볼</th>
+                            <th>최종결정</th>
+                            <th>전략시그널</th>
+                            <th>LLM판단</th>
+                            <th>LLM신뢰도</th>
+                            <th>가격</th>
+                            <th>LLM사유</th>
+                        </tr>
+                    </thead>
+                    <tbody id="decisionsTable">
+                        <tr>
+                            <td colspan="8" class="empty-state">AI 판단 내역이 없습니다</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="pagination" id="decisionsPagination"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let isLoading = false;
+        let refreshInterval5s = null;
+        let refreshInterval15s = null;
+        let _decisionsFilter = null;
+        let _availableSymbols = [];
+
+        const PAGE_SIZE = 10;
+        let _ordersPage = 0;
+        let _ordersData = [];
+        let _decisionsPage = 0;
+        let _decisionsData = [];
+
+        function renderPagination(containerId, currentPage, totalItems, onPageChange) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const totalPages = Math.ceil(totalItems / PAGE_SIZE);
+            if (totalPages <= 1) { container.innerHTML = ''; return; }
+
+            let html = `<button class="pagination-btn" onclick="${onPageChange}(0)" ${currentPage === 0 ? 'disabled' : ''}>&laquo;</button>`;
+            html += `<button class="pagination-btn" onclick="${onPageChange}(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&lsaquo;</button>`;
+
+            const start = Math.max(0, currentPage - 2);
+            const end = Math.min(totalPages, start + 5);
+            for (let i = start; i < end; i++) {
+                html += `<button class="pagination-btn ${i === currentPage ? 'active' : ''}" onclick="${onPageChange}(${i})">${i + 1}</button>`;
+            }
+
+            html += `<span class="pagination-info">${totalItems}건</span>`;
+            html += `<button class="pagination-btn" onclick="${onPageChange}(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>&rsaquo;</button>`;
+            html += `<button class="pagination-btn" onclick="${onPageChange}(${totalPages - 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>&raquo;</button>`;
+            container.innerHTML = html;
+        }
+
+        // Utility functions
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            return Math.round(num).toLocaleString('ko-KR');
+        }
+
+        function formatDecimal(num, decimals = 2) {
+            if (num === null || num === undefined) return '0.00';
+            return Number(num).toFixed(decimals);
+        }
+
+        function formatPercent(num) {
+            if (num === null || num === undefined) return '0.00%';
+            return formatDecimal(num, 2) + '%';
+        }
+
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return '-';
+            const date = new Date(timestamp);
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        }
+
+        function formatUptime(seconds) {
+            if (!seconds) return '0초';
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            
+            const parts = [];
+            if (days > 0) parts.push(`${days}일`);
+            if (hours > 0) parts.push(`${hours}시간`);
+            if (minutes > 0) parts.push(`${minutes}분`);
+            if (secs > 0 || parts.length === 0) parts.push(`${secs}초`);
+            
+            return parts.join(' ');
+        }
+
+        function setButtonLoading(btn, loading) {
+            if (loading) {
+                btn.disabled = true;
+                btn.classList.add('loading');
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('loading');
+            }
+        }
+
+        function showError(message) {
+            alert(message);
+        }
+
+        // API calls
+        async function fetchAPI(endpoint, options = {}) {
+            try {
+                const response = await fetch(endpoint, {
+                    ...options,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                return await response.json();
+            } catch (error) {
+                console.error(`API Error (${endpoint}):`, error);
+                updateConnectionStatus(false);
+                throw error;
+            }
+        }
+
+        // Update functions
+        function updateConnectionStatus(connected) {
+            const dot = document.getElementById('connectionDot');
+            const text = document.getElementById('connectionText');
+            
+            if (connected) {
+                dot.classList.remove('disconnected');
+                text.textContent = '연결됨';
+            } else {
+                dot.classList.add('disconnected');
+                text.textContent = '연결 끊김';
+            }
+        }
+
+        async function updateStatus() {
+            try {
+                const data = await fetchAPI('/api/status');
+                updateConnectionStatus(true);
+                
+                const modeText = data.trading_active 
+                    ? (data.trading_mode === 'paper' ? '모의투자 (활성)' : '실거래 (활성)')
+                    : '중지됨';
+                document.getElementById('tradingMode').textContent = modeText;
+                
+                const killText = data.kill_switch_active 
+                    ? `활성화됨${data.kill_switch_reason ? ': ' + data.kill_switch_reason : ''}`
+                    : '비활성화';
+                document.getElementById('killSwitchStatus').textContent = killText;
+                
+                if (data.kill_switch_active) {
+                    document.getElementById('btnKillActivate').style.display = 'none';
+                    document.getElementById('btnKillDeactivate').style.display = 'block';
+                } else {
+                    document.getElementById('btnKillActivate').style.display = 'block';
+                    document.getElementById('btnKillDeactivate').style.display = 'none';
+                }
+                
+                document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
+                document.getElementById('exchange').textContent = data.exchange || '-';
+                
+                const symbolsText = Array.isArray(data.symbols) ? data.symbols.join(', ') : '-';
+                document.getElementById('symbols').textContent = symbolsText;
+                
+                const buySymbolSelect = document.getElementById('buySymbol');
+                if (Array.isArray(data.symbols) && data.symbols.length > 0) {
+                    const currentValue = buySymbolSelect.value;
+                    buySymbolSelect.innerHTML = '<option value="">심볼 선택</option>' + 
+                        data.symbols.map(s => `<option value="${s}"${s === currentValue ? ' selected' : ''}>${s}</option>`).join('');
+                    
+                    _availableSymbols = data.symbols;
+                    updateDecisionFilters();
+                }
+                
+            } catch (error) {
+                console.error('Failed to update status:', error);
+            }
+        }
+
+        async function updateBalances() {
+            try {
+                const data = await fetchAPI('/api/balances');
+                const grid = document.getElementById('balancesGrid');
+                
+                if (!data.balances || Object.keys(data.balances).length === 0) {
+                    grid.innerHTML = '<div class="empty-state">보유 자산이 없습니다</div>';
+                    return;
+                }
+                
+                grid.innerHTML = '';
+                for (const [currency, amount] of Object.entries(data.balances)) {
+                    const item = document.createElement('div');
+                    item.className = 'balance-item';
+                    item.innerHTML = `
+                        <span class="balance-currency">${currency}</span>
+                        <span class="balance-amount">${formatDecimal(amount, 8)}</span>
+                    `;
+                    grid.appendChild(item);
+                }
+            } catch (error) {
+                console.error('Failed to update balances:', error);
+            }
+        }
+
+        async function updatePositions() {
+            try {
+                const data = await fetchAPI('/api/positions');
+                const tbody = document.getElementById('positionsTable');
+                
+                if (!data.positions || data.positions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">포지션이 없습니다</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = data.positions.map(pos => {
+                    const pnlClass = pos.unrealized_pnl >= 0 ? 'text-success' : 'text-danger';
+                    const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
+                    
+                    return `
+                        <tr>
+                            <td>${pos.symbol}</td>
+                            <td>${formatDecimal(pos.quantity, 8)}</td>
+                            <td>${formatNumber(pos.average_entry_price)}</td>
+                            <td>${formatNumber(pos.current_price)}</td>
+                            <td>${formatNumber(pos.quantity * pos.current_price)}</td>
+                            <td class="${pnlClass}">${pnlSign}${formatNumber(pos.unrealized_pnl)}</td>
+                            <td class="${pnlClass}">${pnlSign}${formatPercent(pos.unrealized_pnl_pct)}</td>
+                            <td><button class="btn-sell" onclick="sellPosition('${pos.symbol}')">전량 매도</button></td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Failed to update positions:', error);
+            }
+        }
+
+        async function updatePnL() {
+            try {
+                const data = await fetchAPI('/api/pnl');
+                
+                document.getElementById('totalValue').textContent = formatNumber(data.total_value_krw);
+                
+                const pnlValue = document.getElementById('totalPnl');
+                const pnlPctValue = document.getElementById('totalPnlPct');
+                const initialEl = document.getElementById('initialBalance');
+                
+                if (data.is_paper) {
+                    pnlValue.textContent = formatNumber(data.total_pnl_krw);
+                    pnlPctValue.textContent = formatPercent(data.total_pnl_pct);
+                    initialEl.textContent = formatNumber(data.initial_balance_krw);
+
+                    if (data.total_pnl_krw >= 0) {
+                        pnlValue.classList.remove('negative');
+                        pnlValue.classList.add('positive');
+                        pnlPctValue.classList.remove('negative');
+                        pnlPctValue.classList.add('positive');
+                    } else {
+                        pnlValue.classList.remove('positive');
+                        pnlValue.classList.add('negative');
+                        pnlPctValue.classList.remove('positive');
+                        pnlPctValue.classList.add('negative');
+                    }
+                } else {
+                    pnlValue.textContent = formatNumber(data.total_pnl_krw);
+                    pnlPctValue.textContent = formatPercent(data.total_pnl_pct);
+                    initialEl.textContent = formatNumber(data.initial_balance_krw);
+
+                    if (data.total_pnl_krw >= 0) {
+                        pnlValue.classList.remove('negative');
+                        pnlValue.classList.add('positive');
+                        pnlPctValue.classList.remove('negative');
+                        pnlPctValue.classList.add('positive');
+                    } else {
+                        pnlValue.classList.remove('positive');
+                        pnlValue.classList.add('negative');
+                        pnlPctValue.classList.remove('positive');
+                        pnlPctValue.classList.add('negative');
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to update P&L:', error);
+            }
+        }
+
+        async function updateOpenOrders() {
+            try {
+                const data = await fetchAPI('/api/orders/open');
+                const tbody = document.getElementById('openOrdersTable');
+                
+                if (!data.orders || data.orders.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">미체결 주문이 없습니다</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = data.orders.map(order => {
+                    const sideClass = order.side === 'BUY' ? 'text-success' : 'text-danger';
+                    const statusBadge = getStatusBadge(order.status);
+                    
+                    return `
+                        <tr>
+                            <td>${order.order_id || order.client_order_id || '-'}</td>
+                            <td>${order.symbol}</td>
+                            <td class="${sideClass}">${order.side}</td>
+                            <td>${order.order_type}</td>
+                            <td>${formatDecimal(order.quantity, 8)}</td>
+                            <td>${formatNumber(order.price)}</td>
+                            <td>${statusBadge}</td>
+                            <td>${formatTimestamp(order.created_at)}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Failed to update open orders:', error);
+            }
+        }
+
+        async function updateOrders() {
+            try {
+                const data = await fetchAPI('/api/orders');
+                _ordersData = data.orders || [];
+                renderOrdersPage(_ordersPage);
+            } catch (error) {
+                console.error('Failed to update orders:', error);
+            }
+        }
+
+        function renderOrdersPage(page) {
+            const tbody = document.getElementById('ordersTable');
+            if (_ordersData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">주문 내역이 없습니다</td></tr>';
+                document.getElementById('ordersPagination').innerHTML = '';
+                return;
+            }
+            const totalPages = Math.ceil(_ordersData.length / PAGE_SIZE);
+            if (page >= totalPages) page = totalPages - 1;
+            if (page < 0) page = 0;
+            _ordersPage = page;
+
+            const slice = _ordersData.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+            tbody.innerHTML = slice.map(order => {
+                const sideClass = order.side === 'BUY' ? 'text-success' : 'text-danger';
+                const statusBadge = getStatusBadge(order.status);
+                return `
+                    <tr>
+                        <td>${order.order_id || order.client_order_id || '-'}</td>
+                        <td>${order.symbol}</td>
+                        <td class="${sideClass}">${order.side}</td>
+                        <td>${order.order_type}</td>
+                        <td>${formatDecimal(order.quantity, 8)}</td>
+                        <td>${formatNumber(order.price)}</td>
+                        <td>${statusBadge}</td>
+                        <td>${formatTimestamp(order.created_at)}</td>
+                    </tr>
+                `;
+            }).join('');
+            renderPagination('ordersPagination', page, _ordersData.length, 'goOrdersPage');
+        }
+
+        function goOrdersPage(page) { renderOrdersPage(page); }
+
+        async function updateSafetyEvents() {
+            try {
+                const data = await fetchAPI('/api/safety-events');
+                const tbody = document.getElementById('safetyEventsTable');
+                
+                if (!data.events || data.events.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">안전 이벤트가 없습니다</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = data.events.slice(0, 50).map(event => {
+                    const severityBadge = getSeverityBadge(event.severity);
+                    
+                    return `
+                        <tr>
+                            <td>${event.event_type}</td>
+                            <td>${severityBadge}</td>
+                            <td>${event.description}</td>
+                            <td>${formatTimestamp(event.timestamp)}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Failed to update safety events:', error);
+            }
+        }
+
+        function updateDecisionFilters() {
+            const filtersContainer = document.getElementById('decisionFilters');
+            if (!filtersContainer) return;
+            
+            const allBtn = `<button class="decision-filter-btn ${_decisionsFilter === null ? 'active' : ''}" onclick="setDecisionsFilter(null)">전체</button>`;
+            const symbolBtns = _availableSymbols.map(symbol => 
+                `<button class="decision-filter-btn ${_decisionsFilter === symbol ? 'active' : ''}" onclick="setDecisionsFilter('${symbol}')">${symbol}</button>`
+            ).join('');
+            
+            filtersContainer.innerHTML = allBtn + symbolBtns;
+        }
+
+        function setDecisionsFilter(symbol) {
+            _decisionsFilter = symbol;
+            _decisionsPage = 0;
+            updateDecisionFilters();
+            updateDecisions();
+        }
+
+        async function updateDecisions() {
+            try {
+                const endpoint = _decisionsFilter 
+                    ? `/api/decisions/${_decisionsFilter.replace('/', '_')}`
+                    : '/api/decisions';
+                const data = await fetchAPI(endpoint);
+                _decisionsData = data.decisions || [];
+                renderDecisionsPage(_decisionsPage);
+            } catch (error) {
+                console.error('Failed to update decisions:', error);
+            }
+        }
+
+        function renderDecisionsPage(page) {
+            const tbody = document.getElementById('decisionsTable');
+            if (_decisionsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">AI 판단 내역이 없습니다</td></tr>';
+                document.getElementById('decisionsPagination').innerHTML = '';
+                return;
+            }
+            const totalPages = Math.ceil(_decisionsData.length / PAGE_SIZE);
+            if (page >= totalPages) page = totalPages - 1;
+            if (page < 0) page = 0;
+            _decisionsPage = page;
+
+            const slice = _decisionsData.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+            tbody.innerHTML = slice.map(decision => {
+                const finalActionBadge = decision.final_action === 'BUY' 
+                    ? '<span class="badge badge-success">BUY</span>'
+                    : decision.final_action === 'SELL'
+                    ? '<span class="badge badge-danger">SELL</span>'
+                    : '<span class="badge badge-secondary">HOLD</span>';
+                
+                const strategyClass = decision.strategy_signal === 'buy' 
+                    ? 'text-success'
+                    : decision.strategy_signal === 'sell'
+                    ? 'text-danger'
+                    : 'text-muted';
+                
+                const llmActionClass = decision.llm_action === 'BUY_CONSIDER'
+                    ? 'text-success'
+                    : decision.llm_action === 'SELL_CONSIDER'
+                    ? 'text-danger'
+                    : 'text-muted';
+                
+                const confidence = parseFloat(decision.llm_confidence || 0);
+                const confidenceClass = confidence >= 0.8 
+                    ? 'text-success'
+                    : confidence >= 0.5
+                    ? 'text-warning'
+                    : 'text-muted';
+                const confidencePct = (confidence * 100).toFixed(0) + '%';
+                
+                const reasoning = decision.llm_reasoning || '-';
+                const reasoningShort = reasoning.length > 40 
+                    ? reasoning.substring(0, 40) + '...'
+                    : reasoning;
+                const escaped = reasoning.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+                const hasLong = reasoning.length > 40;
+                
+                return `
+                    <tr>
+                        <td>${formatTimestamp(decision.ts)}</td>
+                        <td>${decision.symbol}</td>
+                        <td>${finalActionBadge}</td>
+                        <td class="${strategyClass}">${decision.strategy_signal || '-'}</td>
+                        <td class="${llmActionClass}">${decision.llm_action || '-'}</td>
+                        <td class="${confidenceClass}">${confidencePct}</td>
+                        <td>${formatNumber(decision.price)}</td>
+                        <td class="${hasLong ? 'reasoning-cell' : ''}" ${hasLong ? `onclick="showReasoning('${decision.symbol}', '${decision.llm_action || '-'}', '${confidencePct}', '${formatTimestamp(decision.ts)}', this)" data-reasoning="${escaped}"` : ''}>${reasoningShort}</td>
+                    </tr>
+                `;
+            }).join('');
+            renderPagination('decisionsPagination', page, _decisionsData.length, 'goDecisionsPage');
+        }
+
+        function goDecisionsPage(page) { renderDecisionsPage(page); }
+
+        function showReasoning(symbol, llmAction, confidence, timestamp, el) {
+            const reasoning = el.getAttribute('data-reasoning');
+            if (!reasoning || reasoning === '-') return;
+            document.getElementById('reasoningMeta').innerHTML =
+                `<span>${symbol}</span><span>LLM: ${llmAction}</span><span>신뢰도: ${confidence}</span><span>${timestamp}</span>`;
+            document.getElementById('reasoningBody').textContent = reasoning;
+            document.getElementById('reasoningModal').classList.add('active');
+        }
+
+        function closeReasoningModal(e) {
+            if (e && e.target !== e.currentTarget) return;
+            document.getElementById('reasoningModal').classList.remove('active');
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeReasoningModal();
+        });
+
+        function getStatusBadge(status) {
+            const statusMap = {
+                'filled': '<span class="badge badge-success">체결</span>',
+                'pending': '<span class="badge badge-warning">대기</span>',
+                'rejected': '<span class="badge badge-danger">거부</span>',
+                'cancelled': '<span class="badge badge-secondary">취소</span>',
+                'open': '<span class="badge badge-info">미체결</span>'
+            };
+            return statusMap[status?.toLowerCase()] || `<span class="badge badge-secondary">${status}</span>`;
+        }
+
+        function getSeverityBadge(severity) {
+            const severityMap = {
+                'critical': '<span class="badge badge-danger">심각</span>',
+                'high': '<span class="badge badge-danger">높음</span>',
+                'medium': '<span class="badge badge-warning">보통</span>',
+                'low': '<span class="badge badge-info">낮음</span>',
+                'info': '<span class="badge badge-secondary">정보</span>'
+            };
+            return severityMap[severity?.toLowerCase()] || `<span class="badge badge-secondary">${severity}</span>`;
+        }
+
+        // Control actions
+        async function startTrading(mode) {
+            const btn = mode === 'paper' ? document.getElementById('btnStartPaper') : document.getElementById('btnStartLive');
+            setButtonLoading(btn, true);
+            
+            try {
+                await fetchAPI('/api/trading/start', {
+                    method: 'POST',
+                    body: JSON.stringify({ mode })
+                });
+                await updateStatus();
+            } catch (error) {
+                showError(`거래 시작 실패: ${error.message}`);
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        async function stopTrading() {
+            const btn = document.getElementById('btnStop');
+            setButtonLoading(btn, true);
+            
+            try {
+                await fetchAPI('/api/trading/stop', {
+                    method: 'POST'
+                });
+                await updateStatus();
+            } catch (error) {
+                showError(`거래 중지 실패: ${error.message}`);
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        async function activateKillSwitch() {
+            const reason = prompt('킬 스위치 활성화 사유를 입력하세요:');
+            if (!reason) return;
+            
+            const btn = document.getElementById('btnKillActivate');
+            setButtonLoading(btn, true);
+            
+            try {
+                await fetchAPI('/api/kill-switch/activate', {
+                    method: 'POST',
+                    body: JSON.stringify({ reason })
+                });
+                await updateStatus();
+            } catch (error) {
+                showError(`킬 스위치 활성화 실패: ${error.message}`);
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        async function deactivateKillSwitch() {
+            const btn = document.getElementById('btnKillDeactivate');
+            setButtonLoading(btn, true);
+            
+            try {
+                await fetchAPI('/api/kill-switch/deactivate', {
+                    method: 'POST'
+                });
+                await updateStatus();
+            } catch (error) {
+                showError(`킬 스위치 해제 실패: ${error.message}`);
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        async function manualBuy() {
+            const symbol = document.getElementById('buySymbol').value;
+            const amount = parseFloat(document.getElementById('buyAmount').value);
+            
+            if (!symbol || !amount || amount <= 0) {
+                showError('심볼과 금액을 입력하세요');
+                return;
+            }
+            
+            if (!confirm(`${symbol} ${formatNumber(amount)}원 매수하시겠습니까?`)) return;
+            
+            const btn = document.getElementById('btnManualBuy');
+            setButtonLoading(btn, true);
+            
+            try {
+                const result = await fetchAPI('/api/orders/manual-buy', {
+                    method: 'POST',
+                    body: JSON.stringify({ symbol, amount_krw: amount })
+                });
+                
+                if (result.ok) {
+                    document.getElementById('buySymbol').value = '';
+                    document.getElementById('buyAmount').value = '';
+                    await Promise.all([
+                        updatePositions(),
+                        updateBalances(),
+                        updateOpenOrders(),
+                        updateOrders(),
+                        updatePnL()
+                    ]);
+                } else {
+                    showError(result.error || '매수 실패');
+                }
+            } catch (error) {
+                showError(`매수 실패: ${error.message}`);
+            } finally {
+                setButtonLoading(btn, false);
+            }
+        }
+
+        async function sellPosition(symbol) {
+            if (!confirm(`${symbol} 전량 매도하시겠습니까?`)) return;
+            
+            try {
+                const result = await fetchAPI('/api/orders/manual-sell', {
+                    method: 'POST',
+                    body: JSON.stringify({ symbol })
+                });
+                
+                if (result.ok) {
+                    await Promise.all([
+                        updatePositions(),
+                        updateBalances(),
+                        updateOpenOrders(),
+                        updateOrders(),
+                        updatePnL()
+                    ]);
+                } else {
+                    showError(result.error || '매도 실패');
+                }
+            } catch (error) {
+                showError(`매도 실패: ${error.message}`);
+            }
+        }
+
+        document.getElementById('btnStartPaper').addEventListener('click', () => startTrading('paper'));
+        document.getElementById('btnStartLive').addEventListener('click', () => startTrading('live'));
+        document.getElementById('btnStop').addEventListener('click', stopTrading);
+        document.getElementById('btnKillActivate').addEventListener('click', activateKillSwitch);
+        document.getElementById('btnKillDeactivate').addEventListener('click', deactivateKillSwitch);
+        document.getElementById('btnManualBuy').addEventListener('click', manualBuy);
+
+        // Refresh functions
+        async function refresh5s() {
+            await Promise.all([
+                updateStatus(),
+                updateBalances(),
+                updatePositions(),
+                updatePnL(),
+                updateOpenOrders()
+            ]);
+        }
+
+        async function refresh15s() {
+            await Promise.all([
+                updateOrders(),
+                updateSafetyEvents(),
+                updateDecisions()
+            ]);
+        }
+
+        // Initialize
+        async function init() {
+            const overlay = document.getElementById('loadingOverlay');
+            overlay.classList.add('active');
+            
+            try {
+                await Promise.all([
+                    updateStatus(),
+                    updateBalances(),
+                    updatePositions(),
+                    updatePnL(),
+                    updateOpenOrders(),
+                    updateOrders(),
+                    updateSafetyEvents(),
+                    updateDecisions()
+                ]);
+                
+                // Start refresh intervals
+                refreshInterval5s = setInterval(refresh5s, 10000);
+                refreshInterval15s = setInterval(refresh15s, 30000);
+                
+            } catch (error) {
+                console.error('Initialization failed:', error);
+                showError('초기화 실패. 페이지를 새로고침하세요.');
+            } finally {
+                overlay.classList.remove('active');
+            }
+        }
+
+        // Start on load
+        window.addEventListener('load', init);
+
+        // Cleanup on unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval5s) clearInterval(refreshInterval5s);
+            if (refreshInterval15s) clearInterval(refreshInterval15s);
+        });
+    </script>
+</body>
+</html>
