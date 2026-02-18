@@ -72,9 +72,19 @@ class LiveBroker:
     exchange: ExchangeName
     adapter: _ExchangeAdapter
 
-    def __init__(self, exchange: ExchangeName, exchange_adapter: _ExchangeAdapter) -> None:
+    def __init__(
+        self,
+        exchange: ExchangeName,
+        exchange_adapter: _ExchangeAdapter,
+        trading_symbols: list[str] | None = None,
+    ) -> None:
         self.exchange = exchange
         self.adapter = exchange_adapter
+        self._trading_currencies: set[str] = set()
+        if trading_symbols:
+            for s in trading_symbols:
+                base = s.split("/")[0] if "/" in s else s
+                self._trading_currencies.add(base)
         self._accounts_cache: list[Mapping[str, object]] = []
         self._accounts_cache_ts: float = 0.0
         self._ticker_cache: dict[str, tuple[float, Mapping[str, object]]] = {}
@@ -344,26 +354,27 @@ class LiveBroker:
 
         total_krw = balances.get("KRW", Decimal("0"))
         coin_currencies = [c for c in balances if c != "KRW" and balances[c] > 0]
-        symbols_to_fetch = [f"{c}/KRW" for c in coin_currencies]
+
+        known = [f"{c}/KRW" for c in coin_currencies if c in self._trading_currencies]
+        dust = [f"{c}/KRW" for c in coin_currencies if c not in self._trading_currencies]
 
         tickers: dict[str, Mapping[str, object]] = {}
-        if symbols_to_fetch:
+        if known:
             try:
-                tickers = dict(await self.adapter.get_tickers(symbols_to_fetch))
+                tickers = dict(await self.adapter.get_tickers(known))
                 for sym, t in tickers.items():
                     self._ticker_cache[sym] = (now_mono, t)
             except Exception as e:
-                _logger.warning("batch_ticker_failed error=%s, falling back to individual", str(e))
-                # Fallback: fetch each coin individually
-                for sym in symbols_to_fetch:
-                    try:
-                        t = await self.adapter.get_ticker(sym)
-                        if t:
-                            tickers[sym] = t
-                            self._ticker_cache[sym] = (now_mono, t)
-                    except Exception:
-                        # This symbol might not exist on exchange (dust coin)
-                        pass
+                _logger.warning("batch_ticker_failed error=%s", str(e))
+
+        for sym in dust:
+            try:
+                t = await self.adapter.get_ticker(sym)
+                if t:
+                    tickers[sym] = t
+                    self._ticker_cache[sym] = (now_mono, t)
+            except Exception:
+                pass
 
         for currency in coin_currencies:
             qty = balances[currency]

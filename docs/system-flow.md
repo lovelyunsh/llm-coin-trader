@@ -3,24 +3,14 @@
 ## 시스템 아키텍처 개요
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          CLI (click)                                │
-│   trader run [--mode paper|live] [--once]                           │
-│   trader kill [--close-positions]                                   │
-│   trader selftest                                                   │
-│   trader web [--host] [--port]                                      │
-│   trader encrypt-keys --exchange upbit                              │
-└──────────────┬──────────────────────────────────────────────────────┘
-               │
-               ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                      _build_system()                                 │
-│  Settings → 컴포넌트 조립 (DI Container)                              │
+│  Settings → 컴포넌트 조립                                             │
 │                                                                      │
 │  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────────────┐  │
-│  │ Exchange  │ │  Broker  │ │  Strategy  │ │   LLM Advisor        │  │
-│  │ Adapter   │ │ Paper/   │ │ Conserva-  │ │ API Key / OAuth      │  │
-│  │ (Upbit)   │ │ Live     │ │ tive       │ │ (선택)               │  │
+│  │ Exchange  │ │  Broker  │ │  Strategy  │ │   LLM Advisory       │  │
+│  │ Adapter   │ │ Paper/   │ │ Conserva-  │ │ OAuth / gpt-5.2      │  │
+│  │ (Upbit)   │ │ Live     │ │ tive       │ │ (주도적 의사결정자)   │  │
 │  └──────────┘ └──────────┘ └────────────┘ └──────────────────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────────────┐  │
 │  │  Risk    │ │ Execution│ │  Kill      │ │  Anomaly             │  │
@@ -52,9 +42,11 @@ Settings.load_safe()
 ```
 LIVE 모드 요청
 ├── RUN/live_mode_token.txt 파일 존재 확인 (1단계: 파일 기반 토큰)
-├── 'I_UNDERSTAND_LIVE_TRADING' 확인 입력 (2단계: 사용자 확인)
+├── .env에 TRADING_MODE=live 확인 (2단계)
 └── 실패 시 → 즉시 종료
 ```
+
+웹 대시보드에서 `TRADING_MODE=live`가 설정된 상태로 컨테이너가 재시작되면 실거래가 자동으로 시작됩니다.
 
 ### 1.3 컴포넌트 조립 (`_build_system`)
 
@@ -73,15 +65,14 @@ _build_system(settings)
 │   └── PAPER → UpbitAdapter(빈 키, 공개 API만)
 │
 ├── Broker 분기
-│   ├── LIVE → LiveBroker (실제 주문)
+│   ├── LIVE → LiveBroker (배치 ticker, 스테일 캐시 폴백, 순입금 계산)
 │   └── PAPER → PaperBroker (시뮬레이션, 수수료 0.05%)
 │
 ├── ExecutionEngine 생성 (Broker + Risk + Idempotency + Store + KillSwitch)
 ├── ConservativeStrategy 생성
 │
-├── LLM Advisor 분기 (llm_enabled=true 일 때만)
-│   ├── api_key 모드 → LLMAdvisor(api_key, provider, model)
-│   └── oauth 모드 → LLMAdvisor.create_oauth(auth_file, model)
+├── LLM Advisory 분기 (llm_enabled=true 일 때만)
+│   └── oauth 모드 → LLMAdvisory(auth_file, model=gpt-5.2)
 │
 └── Slack Notifier (webhook_url 설정 시)
 ```
@@ -94,11 +85,11 @@ _build_system(settings)
 _main_loop(settings)
 │
 └── while True:
-    ├── for symbol in trading_symbols:  # 예: ["BTC/KRW", "ETH/KRW"]
+    ├── for symbol in trading_symbols:
+    │   # ["BTC/KRW","ETH/KRW","XRP/KRW","ADA/KRW","SOL/KRW"]
     │   └── _run_tick(components, symbol)
     │
-    ├── once=True → break (단일 실행 모드)
-    └── sleep(market_data_interval_sec)  # 기본 60초
+    └── sleep(market_data_interval_sec)  # 30초
 ```
 
 ---
@@ -119,6 +110,7 @@ _run_tick(components, "BTC/KRW")
 │
 ├── [1] 시세 데이터 요청
 │   ├── exchange_adapter.get_ticker(symbol)
+│   │   (알려진 거래 심볼은 배치 조회, 기타 코인은 개별 조회)
 │   ├── 성공 → anomaly_monitor.record_api_success()
 │   └── 실패 →
 │       ├── anomaly_monitor.record_api_failure()
@@ -151,16 +143,16 @@ _run_tick(components, "BTC/KRW")
 │   │   └── return (이번 틱 건너뜀)
 │   └── (정상 → 계속)
 │
-│  ── 전략 실행 ──────────────────────────────────────
+│  ── 전략 시그널 생성 (참고 데이터) ─────────────────
 │
 ├── [4] 캔들 데이터 업데이트
 │   ├── exchange_adapter.get_candles(symbol, "minutes/60", count=200)
 │   └── strategy.update_candles(symbol, candles)
 │
-├── [5] 전략 시그널 생성
+├── [5] 전략 시그널 생성 (LLM 참고용)
 │   └── strategy.on_tick(md) → signals: [Signal, ...]
 │       │
-│       │  ConservativeStrategy 판단 로직:
+│       │  ConservativeStrategy (참고 시그널만 생성):
 │       │  ┌─────────────────────────────────────────┐
 │       │  │ BUY 조건 (모두 충족 시):                  │
 │       │  │  ① Fast EMA > Slow EMA (상승 추세)       │
@@ -168,7 +160,6 @@ _run_tick(components, "BTC/KRW")
 │       │  │  ③ ATR/가격 비율 < 3% (저변동성)         │
 │       │  │  ④ RSI 30~65 (과매수 아님)               │
 │       │  │  ⑤ 거래량 > 평균의 50%                   │
-│       │  │  → confidence ≥ 0.6 시 BUY 시그널        │
 │       │  ├─────────────────────────────────────────┤
 │       │  │ SELL 조건 (하나라도 충족 시):              │
 │       │  │  ① Fast EMA < Slow EMA (추세 반전)       │
@@ -176,6 +167,8 @@ _run_tick(components, "BTC/KRW")
 │       │  ├─────────────────────────────────────────┤
 │       │  │ 나머지 → HOLD                            │
 │       │  └─────────────────────────────────────────┘
+│       │  ※ 이 시그널은 LLM에 전달되는 참고 데이터.
+│       │    LLM이 활성화된 경우 단독으로 주문을 내지 않음.
 │
 │  ── 상태 수집 ──────────────────────────────────────
 │
@@ -186,41 +179,75 @@ _run_tick(components, "BTC/KRW")
 │   └── state 딕셔너리 구성:
 │       { total_balance, position_count, today_pnl, market_price }
 │
-│  ── LLM 자문 (선택, 실행에 영향 없음) ──────────────
+│  ── LLM 의사결정 (주도적 결정자) ───────────────────
 │
-├── [7] LLM Advisory (llm_advisor 존재 시)
-│   ├── market_summary + strategy_signals 구성
-│   ├── llm_advisor.get_advice(symbol, summary, signals)
-│   │   ├── API Key 모드: OpenAI/Anthropic REST API
-│   │   └── OAuth 모드:
-│   │       ├── get_reusable_auth() → 토큰 로드/갱신/브라우저 로그인
-│   │       └── query_codex() → ChatGPT Codex API (SSE 스트리밍)
-│   ├── 응답 → JSON 파싱 → LLMAdvice (action, confidence, reasoning, risk_notes)
-│   ├── 결과 → log_event("decision", {type: "llm_advice", ...})
-│   └── 실패 시 → warning 로그, 무시 (fail-safe)
+├── [7] LLM Advisory
+│   │
+│   ├── [스킵 조건 확인]
+│   │   ├── 가격 변화 < 1% AND 마지막 LLM 호출 < 30분 전
+│   │   └── → advice = None (LLM 스킵, 로그 미기록)
+│   │
+│   ├── [LLM 호출 조건 충족 시]
+│   │   ├── 입력 데이터 구성:
+│   │   │   ├── 시장 데이터, 기술적 지표 (EMA, RSI, ATR)
+│   │   │   ├── 보유 포지션, 잔고
+│   │   │   ├── 최근 주문, 최근 캔들
+│   │   │   └── 이전 5개 결정
+│   │   ├── llm_advisory.get_advice(symbol, data)
+│   │   │   └── OAuth 모드:
+│   │   │       ├── get_reusable_auth() → 토큰 로드/갱신
+│   │   │       └── query_codex() → ChatGPT Codex API (SSE 스트리밍)
+│   │   ├── 응답 → JSON 파싱 → LLMAdvice
+│   │   │   ├── action: HOLD | BUY_CONSIDER | SELL_CONSIDER
+│   │   │   ├── confidence: 최소 0.65 이상이어야 실행
+│   │   │   ├── reasoning: 한국어
+│   │   │   └── risk_notes: 한국어
+│   │   ├── 결과 → log_event("decision", ...) 저장 (프롬프트 포함)
+│   │   └── 실패 시 → warning 로그, advice = None (fail-safe)
+│   │
+│   └── advice 반환 (None 또는 LLMAdvice)
+│
+│  ── 포지션 보호 ─────────────────────────────────────
+│
+├── [8] 포지션 보호 검사 (보유 포지션 있을 때)
+│   ├── 하드 손절 (-10% 이상 손실):
+│   │   └── 시장가(MARKET) 자동 매도, LLM 우회
+│   ├── 소프트 손절 (-5%~-10% 손실):
+│   │   └── LLM 판단 (SELL_CONSIDER = 매도, HOLD = 유지)
+│   ├── 익절 (+10% 이상 수익):
+│   │   └── LLM 판단 (명시적 HOLD만 유지, 나머지 매도)
+│   └── 트레일링 스탑:
+│       └── 최고점 대비 trailing_stop_pct 하락 시 자동 매도
+│
+│  ── 액션 결정 ──────────────────────────────────────
+│
+├── [9] _resolve_action
+│   ├── LLM 활성화 + advice 있음 → LLM action 따름
+│   ├── LLM 활성화 + advice None (스킵/오류) → HOLD
+│   └── LLM 비활성화 → 전략 시그널 따름
 │
 │  ── 주문 실행 ──────────────────────────────────────
 │
-└── [8] 시그널별 주문 처리
+└── [10] 액션별 주문 처리
     │
     ├── HOLD → skip (아무 것도 안 함)
     │
-    ├── BUY →
-    │   ├── 주문 금액 = 총잔고 × max_position_size_pct(10%)
-    │   ├── OrderIntent 생성 (LIMIT 주문)
-    │   └── engine.execute(intent, state) → 아래 참조
+    ├── BUY_CONSIDER (confidence >= 0.65) →
+    │   ├── 주문 금액 = 총잔고 × max_position_size_pct
+    │   ├── OrderIntent 생성
+    │   └── engine.execute(intent, state)
     │
-    └── SELL →
+    └── SELL_CONSIDER (confidence >= 0.65) →
         ├── 해당 심볼 보유 포지션 순회
-        ├── OrderIntent 생성 (전량 매도, LIMIT)
-        └── engine.execute(intent, state) → 아래 참조
+        ├── OrderIntent 생성 (전량 매도)
+        └── engine.execute(intent, state)
 ```
 
 ---
 
 ## 4. 주문 실행 파이프라인 (`ExecutionEngine.execute`)
 
-모든 주문은 반드시 이 파이프라인을 통과합니다. 순서가 바뀌거나 건너뛸 수 없습니다.
+모든 주문은 반드시 이 파이프라인을 통과합니다.
 
 ```
 engine.execute(intent, state)
@@ -236,16 +263,14 @@ engine.execute(intent, state)
 │
 ├── [Gate 3] 리스크 검증 (RiskManager.validate)
 │   │
-│   │  8단계 리스크 체크 (모두 통과해야 승인):
+│   │  리스크 체크:
 │   │
-│   ├── ① 시장가 주문 정책: LIMIT만 허용 (기본)
-│   ├── ② 포지션 크기: 총자산의 10% 초과 시 거부
-│   ├── ③ 최대 포지션 수: 5개 초과 시 거부
-│   ├── ④ 일일 손실 한도: 5% 초과 시 거부
-│   ├── ⑤ 초당 주문 제한: 1건/초 초과 시 거부
-│   ├── ⑥ 일일 주문 제한: 100건/일 초과 시 거부
-│   ├── ⑦ 선물/파생상품: 비활성화 시 거부
-│   └── ⑧ 슬리피지: 50bps 초과 시 거부
+│   ├── ① 포지션 크기: 총자산의 max_position_size_pct 초과 시 거부
+│   ├── ② 일일 손실 한도: 초과 시 거부
+│   ├── ③ 초당 주문 제한: BUY에만 적용 (SELL은 항상 통과)
+│   ├── ④ 일일 주문 제한: BUY에만 적용 (SELL은 항상 통과)
+│   ├── ⑤ 선물/파생상품: 비활성화 시 거부
+│   └── ⑥ 슬리피지: 50bps 초과 시 거부
 │   │
 │   ├── → RiskDecisionRecord 생성 (APPROVED/REJECTED)
 │   └── → DB 저장 (decisions_log)
@@ -261,6 +286,7 @@ engine.execute(intent, state)
 │   │
 │   └── LIVE: LiveBroker
 │       ├── UpbitAdapter.place_order() → 실제 API 호출
+│       │   (손절은 MARKET 주문, 일반 매매는 LIMIT 주문)
 │       └── Order(status=PENDING or FILLED) 반환
 │
 ├── [영속화]
@@ -281,36 +307,38 @@ engine.execute(intent, state)
 │  Layer 1: Kill Switch                                          │
 │  ├── 파일 기반 (RUN/kill_switch)                                │
 │  ├── SIGTERM/SIGINT 시그널 핸들링                               │
-│  ├── CLI: trader kill                                          │
 │  ├── Web API: POST /api/kill-switch/activate                   │
 │  └── API 연속 실패 5회 시 자동 활성화                            │
 │                                                                │
-│  Layer 2: Circuit Breaker                                      │
+│  Layer 2: 포지션 보호                                           │
+│  ├── 하드 손절 (-10%): 시장가 자동 매도, LLM 우회               │
+│  ├── 소프트 손절 (-5%~-10%): LLM 판단                          │
+│  ├── 익절 (+10%+): LLM 판단                                    │
+│  └── 트레일링 스탑: 최고점 대비 자동 매도                        │
+│                                                                │
+│  Layer 3: Circuit Breaker                                      │
 │  └── 전일 종가 대비 15% 이상 변동 → 해당 틱 거래 중단            │
 │                                                                │
-│  Layer 3: Anomaly Monitor                                      │
+│  Layer 4: Anomaly Monitor                                      │
 │  ├── API 연속 실패 감지 → kill switch 자동 활성화               │
 │  ├── 가격 급변 감지 (10%↑) → safety_event 기록                 │
 │  ├── 잔고 불일치 감지 → safety_event 기록                       │
 │  └── 스프레드 이상 감지 (5%↑) → safety_event 기록              │
 │                                                                │
-│  Layer 4: Risk Manager (우회 불가)                              │
-│  ├── 포지션 크기 제한 (10%)                                     │
-│  ├── 최대 포지션 수 (5개)                                       │
-│  ├── 일일 손실 한도 (5%)                                        │
-│  ├── 주문 빈도 제한 (1건/초, 100건/일)                          │
-│  ├── 시장가 주문 차단 (기본)                                     │
+│  Layer 5: Risk Manager                                         │
+│  ├── 포지션 크기 제한                                           │
+│  ├── 일일 손실 한도                                             │
+│  ├── 주문 빈도 제한 (BUY에만 적용)                              │
 │  ├── 슬리피지 제한 (50bps)                                      │
 │  └── 선물/레버리지 차단 (기본)                                   │
 │                                                                │
-│  Layer 5: Idempotency                                          │
+│  Layer 6: Idempotency                                          │
 │  └── intent_id 기반 중복 주문 방지 (메모리 + DB)                │
 │                                                                │
-│  Layer 6: Live 모드 진입 제어                                   │
-│  ├── 토큰 파일 확인                                             │
-│  └── 사용자 확인 문구 입력                                      │
+│  Layer 7: Live 모드 진입 제어                                   │
+│  └── 토큰 파일 확인 (RUN/live_mode_token.txt)                   │
 │                                                                │
-│  Layer 7: API 키 보안                                           │
+│  Layer 8: API 키 보안                                           │
 │  ├── Fernet 암호화 저장 (KeyManager)                            │
 │  └── 로그 자동 마스킹 (redact_sensitive_data)                   │
 └────────────────────────────────────────────────────────────────┘
@@ -320,50 +348,33 @@ engine.execute(intent, state)
 
 ## 6. LLM Advisory 흐름
 
-LLM은 자문만 제공하며 주문 실행에 직접 관여하지 않습니다.
+LLM은 **주도적 의사결정자**입니다. LLM의 action이 실제 매매를 결정합니다.
 
 ```
-┌─ API Key 모드 ────────────────────────────────┐
+┌─ OAuth 모드 (gpt-5.2) ────────────────────────┐
 │                                                │
-│  LLMAdvisor._call_openai()                     │
-│  ├── POST https://api.openai.com/v1/...        │
-│  ├── Authorization: Bearer {api_key}           │
-│  └── JSON 응답 → _parse_response()             │
-│                                                │
-│  LLMAdvisor._call_anthropic()                  │
-│  ├── POST https://api.anthropic.com/v1/...     │
-│  ├── x-api-key: {api_key}                      │
-│  └── JSON 응답 → _parse_response()             │
-└────────────────────────────────────────────────┘
-
-┌─ OAuth 모드 ──────────────────────────────────┐
-│                                                │
-│  LLMAdvisor._call_oauth_codex()                │
+│  LLMAdvisory.get_advice(symbol, data)          │
+│  │                                             │
+│  ├── [스킵 조건]                               │
+│  │   ├── 가격 변화 < 1%                        │
+│  │   └── 마지막 호출 < 30분 전                  │
+│  │   → advice = None, 로그 미기록              │
 │  │                                             │
 │  ├── [인증] get_reusable_auth()                │
 │  │   ├── 저장된 토큰 로드 (.auth/openai-oauth) │
 │  │   ├── 만료 → refresh_access_token()         │
-│  │   ├── 없음 → 브라우저 OAuth PKCE 로그인     │
-│  │   │   ├── PKCE verifier + challenge 생성    │
-│  │   │   ├── localhost:1455 콜백 서버 시작      │
-│  │   │   ├── auth.openai.com 인가 URL 열기     │
-│  │   │   ├── 사용자 로그인 → 콜백으로 code 수신 │
-│  │   │   └── code → token exchange → 저장      │
 │  │   └── AuthTokens (access, refresh, account) │
 │  │                                             │
-│  ├── [모델 검증] normalize_model()              │
-│  │   └── 허용: gpt-5.2-codex, gpt-5.1-codex...│
+│  ├── [프롬프트 구성]                            │
+│  │   ├── 시장 데이터, 기술적 지표               │
+│  │   ├── 보유 포지션, 잔고                      │
+│  │   ├── 최근 주문, 최근 캔들                   │
+│  │   └── 이전 5개 결정                         │
 │  │                                             │
 │  └── [API 호출] query_codex()                  │
 │      ├── POST chatgpt.com/backend-api/codex/   │
 │      │   responses                             │
-│      ├── Headers:                              │
-│      │   ├── Authorization: Bearer {token}     │
-│      │   ├── chatgpt-account-id: {id}          │
-│      │   ├── OpenAI-Beta: responses=experiment │
-│      │   └── originator: opencode              │
-│      ├── Body: model, stream, instructions,    │
-│      │   reasoning, input                      │
+│      ├── model: gpt-5.2                        │
 │      ├── SSE 스트리밍 수신                      │
 │      │   ├── response.output_text.delta → 조립 │
 │      │   └── [DONE] → 종료                     │
@@ -371,20 +382,25 @@ LLM은 자문만 제공하며 주문 실행에 직접 관여하지 않습니다.
 │                                                │
 └────────────────────────────────────────────────┘
 
-┌─ 공통 응답 처리 ──────────────────────────────┐
+┌─ 응답 처리 ───────────────────────────────────┐
 │                                                │
 │  _parse_response(text)                         │
 │  ├── JSON 파싱 (```json 코드펜스 처리)          │
-│  └── LLMAdvice.from_mapping() 스키마 검증:      │
+│  └── LLMAdvice 스키마 검증:                    │
 │      ├── action: HOLD | BUY_CONSIDER |         │
 │      │          SELL_CONSIDER                   │
 │      ├── confidence: 0.0 ~ 1.0                 │
-│      ├── reasoning: 최대 500자                  │
-│      ├── risk_notes: 최대 300자                 │
+│      │   (0.65 미만이면 실행 안 함)             │
+│      ├── reasoning: 한국어, 최대 500자          │
+│      ├── risk_notes: 한국어, 최대 300자         │
 │      └── 검증 실패 → None (fail-safe)           │
 │                                                │
-│  결과: log_event("decision", ...) 로 기록만     │
-│  → 주문 로직에 영향 없음                        │
+│  결과: log_event("decision", ...) 저장          │
+│  (프롬프트 포함, 대시보드 "P" 버튼으로 확인 가능) │
+│                                                │
+│  BUY_CONSIDER → 매수 실행                      │
+│  SELL_CONSIDER → 매도 실행                     │
+│  HOLD → 아무 것도 안 함                        │
 └────────────────────────────────────────────────┘
 ```
 
@@ -404,13 +420,18 @@ StateStore (SQLite, WAL 모드)
 ├── decisions_log     # 리스크 결정 기록
 └── safety_events     # 안전 이벤트 기록
 
-로그 파일 (JSONL 분리)
-├── logs/decisions.jsonl
+로그 파일 (JSONL, 코인별 분리)
+├── logs/decisions_btc_krw.jsonl   # BTC AI 결정 (HOLD 압축 적용)
+├── logs/decisions_eth_krw.jsonl   # ETH AI 결정
+├── logs/decisions_xrp_krw.jsonl   # XRP AI 결정
+├── logs/decisions_ada_krw.jsonl   # ADA AI 결정
+├── logs/decisions_sol_krw.jsonl   # SOL AI 결정
 ├── logs/orders.jsonl
-├── logs/fills.jsonl
-├── logs/balances.jsonl
 ├── logs/safety.jsonl
 └── logs/general.jsonl
+
+HOLD 압축: 연속 HOLD가 1시간 초과 시 첫 번째와 마지막만 보존
+LLM 스킵: 가격 변화 < 1% + 30분 미경과 → 로그 미기록
 ```
 
 ---
@@ -418,28 +439,43 @@ StateStore (SQLite, WAL 모드)
 ## 8. 웹 대시보드
 
 ```
-trader web --port 8000
+FastAPI + Jinja2 (포트 8932)
 │
-├── FastAPI + Jinja2 HTML 템플릿
-├── GET  /                      → 대시보드 UI (한국어)
+├── 인증
+│   ├── GET  /login                    → 로그인 페이지
+│   ├── POST /api/auth/login           → 마스터 코드 인증 (쿠키 세션)
+│   └── GET  /                         → 대시보드 (인증 필요)
 │
-├── GET  /api/status            → 시스템 상태 (모드, 킬스위치, 가동시간)
-├── GET  /api/balances          → 보유 자산
-├── GET  /api/positions         → 보유 포지션
-├── GET  /api/pnl               → 손익 현황
-├── GET  /api/orders            → 전체 주문 내역
-├── GET  /api/orders/open       → 미체결 주문
-├── GET  /api/safety-events     → 안전 이벤트
-├── GET  /api/decisions         → 리스크 결정 로그
+├── 시스템 제어
+│   ├── GET  /api/status               → 시스템 상태
+│   ├── POST /api/trading/start        → 거래 시작 (paper/live)
+│   ├── POST /api/trading/stop         → 거래 중지
+│   ├── POST /api/kill-switch/activate → Kill Switch 활성화
+│   └── POST /api/kill-switch/deactivate → Kill Switch 해제
 │
-├── POST /api/trading/start     → 거래 시작 (paper/live)
-├── POST /api/trading/stop      → 거래 중지
-├── POST /api/kill-switch/activate   → 킬 스위치 활성화
-└── POST /api/kill-switch/deactivate → 킬 스위치 해제
+├── 데이터 조회
+│   ├── GET  /api/balances             → 잔고
+│   ├── GET  /api/positions            → 포지션 (현재가 포함)
+│   ├── GET  /api/pnl                  → 손익 (초기 잔고 = 2026년 이후 순입금)
+│   ├── GET  /api/orders               → 전체 주문 (10개씩 페이지네이션)
+│   ├── GET  /api/orders/open          → 미체결 주문
+│   ├── GET  /api/safety-events        → 안전 이벤트
+│   ├── GET  /api/decisions            → 전체 AI 결정 (10개씩 페이지네이션)
+│   └── GET  /api/decisions/{symbol}   → 코인별 AI 결정
+│
+├── 수동 거래
+│   ├── POST /api/orders/manual-buy    → 수동 매수 {symbol, amount_krw}
+│   └── POST /api/orders/manual-sell   → 수동 매도 {symbol}
+│
+└── 클라이언트 자동 갱신
+    ├── 10초: 상태, 잔고, 포지션, 손익, 미체결 주문
+    └── 30초: 전체 주문, 안전 이벤트, AI 결정
 
-클라이언트 자동 갱신:
-├── 5초 간격: 상태, 잔고, 포지션, 손익, 미체결 주문
-└── 15초 간격: 전체 주문, 안전 이벤트, 리스크 결정
+대시보드 주요 기능:
+├── 포지션 테이블: 심볼, 수량, 평균진입가, 현재가, 평가금액,
+│                 미실현손익, 미실현손익률, 전량매도 버튼
+├── AI 판단 로그: 코인별 필터, reasoning 모달 팝업
+└── 프롬프트 확인: "P" 버튼으로 LLM에 전달된 프롬프트 조회
 ```
 
 ---
@@ -448,44 +484,44 @@ trader web --port 8000
 
 ```
 coin_trader/
-├── main.py                     # CLI + 메인 루프 + _run_tick
-├── config/
-│   └── settings.py             # 환경 설정 (pydantic-settings)
+├── main.py                     # 메인 루프, _run_tick, _resolve_action, LLM 연동
+├── config/settings.py          # 설정 (pydantic-settings)
 ├── core/
 │   ├── contracts.py            # 인터페이스 정의
-│   └── models.py               # 도메인 모델 (Pydantic)
+│   └── models.py               # 도메인 모델 (Position, Order 등)
 ├── exchange/
-│   ├── base.py                 # 거래소 어댑터 베이스 (httpx + tenacity)
-│   └── upbit.py                # 업비트 API 어댑터
+│   ├── base.py                 # httpx + tenacity + 레이트 리밋
+│   └── upbit.py                # 업비트 어댑터 (배치 ticker, 입출금 조회)
 ├── broker/
 │   ├── paper.py                # 모의투자 브로커
-│   └── live.py                 # 실거래 브로커
+│   └── live.py                 # 실거래 브로커 (배치 ticker, 스테일 캐시 폴백, 순입금)
 ├── strategy/
-│   └── conservative.py         # 보수적 추세추종 전략 (EMA+ATR+RSI)
+│   └── conservative.py         # EMA+RSI+ATR (참고 시그널 전용)
 ├── risk/
 │   ├── limits.py               # 불변 리스크 상수
-│   └── manager.py              # 리스크 검증 (8단계)
+│   └── manager.py              # 리스크 게이트 (포지션 수 제한 없음, SELL 우회)
 ├── execution/
 │   ├── engine.py               # 주문 실행 파이프라인
 │   └── idempotency.py          # 중복 주문 방지
 ├── safety/
 │   ├── kill_switch.py          # 긴급 정지
-│   └── monitor.py              # 이상 징후 감지
+│   └── monitor.py              # 이상징후 감지
 ├── llm/
-│   ├── advisory.py             # LLM 자문 (API Key + OAuth)
-│   ├── oauth_openai.py         # OpenAI OAuth PKCE 인증
-│   └── codex_client.py         # ChatGPT Codex API SSE 클라이언트
+│   ├── advisory.py             # LLM 주도 의사결정 (한국어 출력, 프롬프트 저장)
+│   ├── oauth_openai.py         # OAuth PKCE 인증
+│   └── codex_client.py         # ChatGPT Codex SSE 클라이언트
 ├── state/
-│   └── store.py                # SQLite 상태 저장소
+│   └── store.py                # SQLite WAL 상태 저장소
 ├── security/
-│   └── key_manager.py          # API 키 암호화 (Fernet)
+│   └── key_manager.py          # API 키 Fernet 암호화
 ├── logging/
-│   ├── logger.py               # 구조화 로깅 (structlog)
+│   ├── logger.py               # structlog + JSONL 타입별 분리 + HOLD 압축
 │   └── redaction.py            # 민감정보 마스킹
 ├── notify/
 │   └── slack.py                # Slack 알림
 └── web/
-    ├── api.py                  # FastAPI 웹 서버
+    ├── api.py                  # FastAPI + 인증 미들웨어 + 실거래 자동 시작
     └── templates/
-        └── dashboard.html      # 대시보드 UI
+        ├── dashboard.html      # 대시보드 (페이지네이션, 모달, 인증)
+        └── login.html          # 로그인 페이지
 ```
