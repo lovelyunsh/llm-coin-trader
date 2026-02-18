@@ -92,17 +92,24 @@ class RiskManager:
     async def validate(self, intent: OrderIntent, state: dict[str, object]) -> RiskDecisionRecord:
         now = datetime.now(timezone.utc)
         self._reset_daily_if_needed()
+        is_buy = intent.side == OrderSide.BUY
 
         # 1. Market order policy: must be LIMIT unless explicit exception
-        if intent.order_type == OrderType.MARKET and self.limits.default_order_type == "limit":
+        if (
+            is_buy
+            and intent.order_type == OrderType.MARKET
+            and self.limits.default_order_type == "limit"
+        ):
             return self._reject(
                 intent, now, "Market orders not allowed by default policy. Use limit orders."
             )
 
-        # 2. Position size check
         total_balance = _as_decimal(state.get("total_balance"), ZERO)
         order_value = intent.quote_quantity or (intent.quantity or ZERO) * (intent.price or ZERO)
-        if total_balance > 0 and order_value > 0:
+        current_positions = _as_int(state.get("position_count"), 0)
+
+        # 2. Position sizing and exposure checks (buy only)
+        if is_buy and total_balance > 0 and order_value > 0:
             position_pct = (order_value / total_balance) * Decimal("100")
             if position_pct > self.limits.max_position_size_pct:
                 return self._reject(
@@ -111,11 +118,20 @@ class RiskManager:
                     f"Position size {position_pct:.1f}% exceeds limit {self.limits.max_position_size_pct}%",
                 )
 
-        current_positions = _as_int(state.get("position_count"), 0)
+            current_symbol_value = _as_decimal(state.get("current_symbol_value"), ZERO)
+            projected_symbol_pct = ((current_symbol_value + order_value) / total_balance) * Decimal(
+                "100"
+            )
+            if projected_symbol_pct > self.limits.max_single_coin_exposure_pct:
+                return self._reject(
+                    intent,
+                    now,
+                    f"Single-coin exposure {projected_symbol_pct:.1f}% exceeds limit {self.limits.max_single_coin_exposure_pct}%",
+                )
 
         # 4. Daily drawdown check
         today_pnl = _as_decimal(state.get("today_pnl"), ZERO)
-        if total_balance > 0:
+        if is_buy and total_balance > 0:
             drawdown_pct = abs(min(today_pnl, ZERO)) / total_balance * Decimal("100")
             if drawdown_pct >= self.limits.daily_max_drawdown_pct:
                 return self._reject(
@@ -127,20 +143,15 @@ class RiskManager:
         # 5. Rate limit check (buy only)
         cutoff = now - timedelta(seconds=1)
         self._order_timestamps = [t for t in self._order_timestamps if t > cutoff]
-        if (
-            intent.side == OrderSide.BUY
-            and len(self._order_timestamps) >= self.limits.max_orders_per_second
-        ):
+        if is_buy and len(self._order_timestamps) >= self.limits.max_orders_per_second:
             return self._reject(
                 intent, now, f"Rate limit exceeded: {len(self._order_timestamps)}/s"
             )
 
         # 6. Daily order count (buy only)
-        self._daily_order_count += 1
-        if (
-            intent.side == OrderSide.BUY
-            and self._daily_order_count > self.limits.max_orders_per_day
-        ):
+        if is_buy:
+            self._daily_order_count += 1
+        if is_buy and self._daily_order_count > self.limits.max_orders_per_day:
             return self._reject(
                 intent,
                 now,
@@ -154,7 +165,7 @@ class RiskManager:
                 return self._reject(intent, now, "Futures/derivatives trading is disabled")
 
         # 8. Slippage check for limit orders
-        if intent.order_type == OrderType.LIMIT and intent.price:
+        if is_buy and intent.order_type == OrderType.LIMIT and intent.price:
             market_price = _as_decimal(state.get("market_price"), ZERO)
             if market_price > 0:
                 slippage_bps = abs(intent.price - market_price) / market_price * Decimal("10000")
@@ -166,7 +177,8 @@ class RiskManager:
                     )
 
         # All checks passed
-        self._order_timestamps.append(now)
+        if is_buy:
+            self._order_timestamps.append(now)
         return _risk_record(
             intent_id=intent.intent_id,
             decision=RiskDecision.APPROVED,

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -36,6 +37,15 @@ _valid_sessions: set[str] = set()
 
 _AUTH_BYPASS_PATHS = frozenset({"/login", "/api/auth/login"})
 
+_API_CACHE_TTL_FAST_SEC = 10.0
+_API_CACHE_TTL_SLOW_SEC = 30.0
+_API_CACHE_TTL_BALANCES_SEC = _API_CACHE_TTL_FAST_SEC
+_API_CACHE_TTL_POSITIONS_SEC = _API_CACHE_TTL_FAST_SEC
+_API_CACHE_TTL_OPEN_ORDERS_SEC = _API_CACHE_TTL_FAST_SEC
+_API_CACHE_TTL_PNL_SEC = _API_CACHE_TTL_FAST_SEC
+_api_response_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_api_cache_lock = asyncio.Lock()
+
 
 def _decimal_default(obj: object) -> object:
     if isinstance(obj, Decimal):
@@ -55,6 +65,31 @@ def _model_to_dict(m: object) -> dict[str, Any]:
         if isinstance(dumped, dict):
             return dumped
     return dict(m) if isinstance(m, dict) else {"value": str(m)}
+
+
+def _invalidate_api_cache() -> None:
+    _api_response_cache.clear()
+
+
+async def _cached_api_response(
+    key: str,
+    ttl_seconds: float,
+    loader: Callable[[], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    now = time.monotonic()
+    cached = _api_response_cache.get(key)
+    if cached and now - cached[0] < ttl_seconds:
+        return cached[1]
+
+    async with _api_cache_lock:
+        now = time.monotonic()
+        cached = _api_response_cache.get(key)
+        if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+
+        payload = await loader()
+        _api_response_cache[key] = (time.monotonic(), payload)
+        return payload
 
 
 @asynccontextmanager
@@ -218,6 +253,18 @@ async def _trading_loop() -> None:
                 except Exception:
                     pass
 
+            try:
+                store: StateStore | None = _components.get("store")
+                broker = _components.get("broker")
+                if store and broker and hasattr(broker, "sync_order_statuses"):
+                    open_orders = store.get_open_orders()
+                    if open_orders:
+                        updated = await broker.sync_order_statuses(open_orders)
+                        for order in updated:
+                            store.save_order(order)
+            except Exception:
+                pass
+
             for symbol in settings.trading_symbols:
                 if not _is_trading:
                     break
@@ -264,6 +311,7 @@ async def start_trading(request: Request) -> JSONResponse:
 
     _components.update(_build_system(settings))
     _logger_mod.set_trading_mode(mode)
+    _invalidate_api_cache()
 
     _trading_mode = mode
     _is_trading = True
@@ -287,6 +335,7 @@ async def stop_trading() -> JSONResponse:
         except asyncio.CancelledError:
             pass
     _trading_task = None
+    _invalidate_api_cache()
 
     return JSONResponse({"ok": True})
 
@@ -310,6 +359,13 @@ async def activate_kill_switch(request: Request) -> JSONResponse:
     )
 
     kill_switch.activate(reason)
+    notifier = _components.get("notifier")
+    settings: Settings | None = _components.get("settings")
+    if notifier and settings and settings.is_live_mode() and hasattr(notifier, "send_alert"):
+        try:
+            await notifier.send_alert("킬 스위치 활성화", f"사유: {reason}", "critical")
+        except Exception:
+            pass
 
     # Also stop trading
     _is_trading = False
@@ -320,6 +376,7 @@ async def activate_kill_switch(request: Request) -> JSONResponse:
         except asyncio.CancelledError:
             pass
     _trading_task = None
+    _invalidate_api_cache()
 
     return JSONResponse({"ok": True, "reason": reason})
 
@@ -331,6 +388,7 @@ async def deactivate_kill_switch() -> JSONResponse:
         return JSONResponse({"ok": False, "error": "Kill switch not initialized"}, status_code=500)
 
     kill_switch.deactivate()
+    _invalidate_api_cache()
     return JSONResponse({"ok": True})
 
 
@@ -344,8 +402,17 @@ async def get_balances() -> JSONResponse:
         return JSONResponse({"balances": {}, "total_value_krw": 0})
 
     try:
-        snapshot = await broker.fetch_balances()
-        return JSONResponse(_model_to_dict(snapshot))
+
+        async def _load() -> dict[str, Any]:
+            snapshot = await broker.fetch_balances()
+            return _model_to_dict(snapshot)
+
+        payload = await _cached_api_response(
+            "balances",
+            _API_CACHE_TTL_BALANCES_SEC,
+            _load,
+        )
+        return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -360,8 +427,17 @@ async def get_positions() -> JSONResponse:
         return JSONResponse({"positions": []})
 
     try:
-        positions = await broker.fetch_positions()
-        return JSONResponse({"positions": [_model_to_dict(p) for p in positions]})
+
+        async def _load() -> dict[str, Any]:
+            positions = await broker.fetch_positions()
+            return {"positions": [_model_to_dict(p) for p in positions]}
+
+        payload = await _cached_api_response(
+            "positions",
+            _API_CACHE_TTL_POSITIONS_SEC,
+            _load,
+        )
+        return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -375,8 +451,16 @@ async def get_orders() -> JSONResponse:
     if not store:
         return JSONResponse({"orders": []})
 
-    orders = store.get_all_orders(limit=100)
-    return JSONResponse({"orders": [_model_to_dict(o) for o in orders]})
+    async def _load() -> dict[str, Any]:
+        orders = store.get_all_orders(limit=100)
+        return {"orders": [_model_to_dict(o) for o in orders]}
+
+    payload = await _cached_api_response(
+        "orders",
+        _API_CACHE_TTL_SLOW_SEC,
+        _load,
+    )
+    return JSONResponse(payload)
 
 
 @app.get("/api/orders/open")
@@ -386,8 +470,17 @@ async def get_open_orders() -> JSONResponse:
         return JSONResponse({"orders": []})
 
     try:
-        orders = await broker.fetch_open_orders()
-        return JSONResponse({"orders": [_model_to_dict(o) for o in orders]})
+
+        async def _load() -> dict[str, Any]:
+            orders = await broker.fetch_open_orders()
+            return {"orders": [_model_to_dict(o) for o in orders]}
+
+        payload = await _cached_api_response(
+            "open_orders",
+            _API_CACHE_TTL_OPEN_ORDERS_SEC,
+            _load,
+        )
+        return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -401,8 +494,16 @@ async def get_safety_events() -> JSONResponse:
     if not store:
         return JSONResponse({"events": []})
 
-    events = store.get_safety_events(limit=50)
-    return JSONResponse({"events": [_model_to_dict(e) for e in events]})
+    async def _load() -> dict[str, Any]:
+        events = store.get_safety_events(limit=50)
+        return {"events": [_model_to_dict(e) for e in events]}
+
+    payload = await _cached_api_response(
+        "safety_events",
+        _API_CACHE_TTL_SLOW_SEC,
+        _load,
+    )
+    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -440,13 +541,30 @@ def _read_decision_logs(symbol: str | None = None, limit: int = 50) -> list[dict
 
 @app.get("/api/decisions")
 async def get_decisions() -> JSONResponse:
-    return JSONResponse({"decisions": _read_decision_logs(limit=100)})
+    async def _load() -> dict[str, Any]:
+        return {"decisions": _read_decision_logs(limit=100)}
+
+    payload = await _cached_api_response(
+        "decisions_all",
+        _API_CACHE_TTL_SLOW_SEC,
+        _load,
+    )
+    return JSONResponse(payload)
 
 
 @app.get("/api/decisions/{symbol_path:path}")
 async def get_decisions_by_symbol(symbol_path: str) -> JSONResponse:
     symbol = symbol_path.replace("_", "/").upper()
-    return JSONResponse({"decisions": _read_decision_logs(symbol=symbol, limit=100)})
+
+    async def _load() -> dict[str, Any]:
+        return {"decisions": _read_decision_logs(symbol=symbol, limit=100)}
+
+    payload = await _cached_api_response(
+        f"decisions_symbol:{symbol}",
+        _API_CACHE_TTL_SLOW_SEC,
+        _load,
+    )
+    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -462,39 +580,40 @@ async def get_pnl() -> JSONResponse:
         return JSONResponse({"error": "broker not initialized"}, status_code=500)
 
     try:
-        balances = await broker.fetch_balances()
-        positions = await broker.fetch_positions()
 
-        total_value = float(balances.total_value_krw or 0)
+        async def _load() -> dict[str, Any]:
+            balances = await broker.fetch_balances()
+            positions = await broker.fetch_positions()
 
-        is_paper = settings and settings.trading_mode == TradingMode.PAPER
-        if is_paper:
-            initial_balance = 1_000_000.0
-        else:
-            try:
-                initial_balance = float(await broker.get_net_deposits())
-            except Exception:
-                initial_balance = total_value  # fallback
+            total_value = float(balances.total_value_krw or 0)
 
-        total_pnl = total_value - initial_balance
-        total_pnl_pct = (total_pnl / initial_balance * 100) if initial_balance > 0 else 0.0
+            is_paper = settings and settings.trading_mode == TradingMode.PAPER
+            if is_paper:
+                initial_balance = 1_000_000.0
+            else:
+                try:
+                    initial_balance = float(await broker.get_net_deposits())
+                except Exception:
+                    initial_balance = total_value
 
-        position_pnls = []
-        for p in positions:
-            pd = _model_to_dict(p)
-            position_pnls.append(
-                {
-                    "symbol": pd.get("symbol", ""),
-                    "quantity": pd.get("quantity", 0),
-                    "average_entry_price": pd.get("average_entry_price", 0),
-                    "current_price": pd.get("current_price", 0),
-                    "unrealized_pnl": pd.get("unrealized_pnl", 0),
-                    "unrealized_pnl_pct": pd.get("unrealized_pnl_pct", 0),
-                }
-            )
+            total_pnl = total_value - initial_balance
+            total_pnl_pct = (total_pnl / initial_balance * 100) if initial_balance > 0 else 0.0
 
-        return JSONResponse(
-            {
+            position_pnls = []
+            for p in positions:
+                pd = _model_to_dict(p)
+                position_pnls.append(
+                    {
+                        "symbol": pd.get("symbol", ""),
+                        "quantity": pd.get("quantity", 0),
+                        "average_entry_price": pd.get("average_entry_price", 0),
+                        "current_price": pd.get("current_price", 0),
+                        "unrealized_pnl": pd.get("unrealized_pnl", 0),
+                        "unrealized_pnl_pct": pd.get("unrealized_pnl_pct", 0),
+                    }
+                )
+
+            return {
                 "total_value_krw": total_value,
                 "initial_balance_krw": initial_balance,
                 "total_pnl_krw": round(total_pnl, 2),
@@ -502,7 +621,13 @@ async def get_pnl() -> JSONResponse:
                 "positions": position_pnls,
                 "is_paper": is_paper,
             }
+
+        payload = await _cached_api_response(
+            "pnl",
+            _API_CACHE_TTL_PNL_SEC,
+            _load,
         )
+        return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -548,10 +673,15 @@ async def manual_buy(request: Request) -> JSONResponse:
 
         balances = await broker.fetch_balances()
         positions = await broker.fetch_positions()
+        current_symbol_value = Decimal("0")
+        for p in positions:
+            if p.symbol == symbol and p.quantity > 0:
+                current_symbol_value += p.quantity * current_price
 
         state: dict[str, object] = {
             "total_balance": balances.total_value_krw or Decimal("0"),
             "position_count": len(positions),
+            "current_symbol_value": current_symbol_value,
             "today_pnl": Decimal("0"),
             "market_price": current_price,
         }
@@ -571,6 +701,17 @@ async def manual_buy(request: Request) -> JSONResponse:
         order = await engine.execute(intent, state)
 
         if order:
+            _invalidate_api_cache()
+            notifier = _components.get("notifier")
+            if notifier and settings.is_live_mode() and hasattr(notifier, "send_alert"):
+                try:
+                    await notifier.send_alert(
+                        "실제 수동 매수 체결 요청",
+                        f"{order.symbol} BUY {order.quantity} @ {order.price}\nstatus={order.status.value}",
+                        "medium",
+                    )
+                except Exception:
+                    pass
             return JSONResponse({"ok": True, "order": _model_to_dict(order)})
         else:
             return JSONResponse(
@@ -650,6 +791,17 @@ async def manual_sell(request: Request) -> JSONResponse:
         order = await engine.execute(intent, state)
 
         if order:
+            _invalidate_api_cache()
+            notifier = _components.get("notifier")
+            if notifier and settings.is_live_mode() and hasattr(notifier, "send_alert"):
+                try:
+                    await notifier.send_alert(
+                        "실제 수동 매도 체결 요청",
+                        f"{order.symbol} SELL {order.quantity} @ {order.price}\nstatus={order.status.value}",
+                        "high",
+                    )
+                except Exception:
+                    pass
             return JSONResponse({"ok": True, "order": _model_to_dict(order)})
         else:
             return JSONResponse(

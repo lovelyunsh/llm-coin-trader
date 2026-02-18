@@ -46,6 +46,9 @@ class _ExchangeAdapter(Protocol):
     async def get_open_orders(self) -> object:
         ...
 
+    async def get_order(self, order_id: str) -> Mapping[str, object]:
+        ...
+
     async def get_balances(self) -> object:
         ...
 
@@ -428,6 +431,47 @@ class LiveBroker:
     async def fetch_positions(self) -> list[Position]:
         _, positions = await self._build_snapshot()
         return positions
+
+    async def sync_order_statuses(self, orders: list[Order]) -> list[Order]:
+        updated: list[Order] = []
+        for order in orders:
+            if order.order_id is None:
+                continue
+            try:
+                raw = await self.adapter.get_order(order.order_id)
+                if not raw:
+                    continue
+
+                status_str = str(raw.get("state", "")).lower()
+                status_map = {
+                    "wait": OrderStatus.SUBMITTED,
+                    "watch": OrderStatus.SUBMITTED,
+                    "done": OrderStatus.FILLED,
+                    "cancel": OrderStatus.CANCELLED,
+                }
+                new_status = status_map.get(status_str)
+                if new_status is None or new_status == order.status:
+                    continue
+
+                executed = Decimal(str(raw.get("executed_volume", "0")))
+                avg_price_raw = raw.get("avg_price", raw.get("price"))
+                avg_price = Decimal(str(avg_price_raw)) if avg_price_raw else None
+
+                now = datetime.now(timezone.utc)
+                updated_order = order.model_copy(
+                    update={
+                        "status": new_status,
+                        "filled_quantity": executed,
+                        "average_fill_price": avg_price,
+                        "updated_at": now,
+                    }
+                )
+                updated.append(updated_order)
+            except Exception as e:
+                _logger.debug(
+                    "sync_order_status_failed order_id=%s error=%s", order.order_id, str(e)
+                )
+        return updated
 
     async def fetch_fills(self, _order_id: str) -> list[Fill]:
         return []

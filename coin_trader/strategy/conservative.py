@@ -15,6 +15,7 @@ import dataclasses
 from datetime import datetime, timezone
 from decimal import Decimal
 from collections.abc import Mapping
+from typing import ClassVar
 
 from coin_trader.core.models import MarketData, Signal, SignalType
 
@@ -25,12 +26,24 @@ class TechnicalIndicators:
 
     fast_ema: float
     slow_ema: float
+    ema200: float
     rsi: float
     atr: float
     vol_ratio: float
     avg_volume: float
     current_volume: float
     current_price: float
+    trend_strength: float
+    adx: float
+    plus_di: float
+    minus_di: float
+    macd: float
+    macd_signal: float
+    macd_histogram: float
+    bb_upper: float
+    bb_middle: float
+    bb_lower: float
+    bb_width: float
     uptrend: bool
     price_above_slow: bool
     low_volatility: bool
@@ -38,10 +51,24 @@ class TechnicalIndicators:
     volume_ok: bool
     downtrend: bool
     rsi_overbought: bool
-    trend_strength: float
+    _BOOL_FLAGS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "uptrend",
+            "price_above_slow",
+            "low_volatility",
+            "rsi_ok_buy",
+            "volume_ok",
+            "downtrend",
+            "rsi_overbought",
+        }
+    )
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
+
+    def to_llm_dict(self) -> dict[str, object]:
+        """Return indicators for LLM consumption (raw values only, no booleans)."""
+        return {k: v for k, v in dataclasses.asdict(self).items() if k not in self._BOOL_FLAGS}
 
 
 class ConservativeStrategy:
@@ -98,14 +125,20 @@ class ConservativeStrategy:
 
         fast_ema = self._ema(closes, self.fast_period)
         slow_ema = self._ema(closes, self.slow_period)
+        ema200 = self._ema(closes, 200)
         atr = self._atr(highs, lows, closes, self.atr_period)
         rsi = self._rsi(closes, self.rsi_period)
+        adx_val, plus_di_val, minus_di_val = self._adx(highs, lows, closes, self.atr_period)
+        macd_line, signal_line, histogram = self._macd(closes)
+        bb_upper, bb_middle, bb_lower, bb_width = self._bollinger_bands(closes)
+
         window = volumes[-20:] if len(volumes) >= 20 else volumes
         avg_volume = (sum(window) / len(window)) if window else 0.0
 
         current_price = closes[-1]
         current_fast = fast_ema[-1]
         current_slow = slow_ema[-1]
+        current_ema200 = ema200[-1] if ema200 else 0.0
         current_atr = atr[-1]
         current_rsi = rsi[-1]
         current_vol = volumes[-1]
@@ -118,12 +151,24 @@ class ConservativeStrategy:
         return TechnicalIndicators(
             fast_ema=round(current_fast, 2),
             slow_ema=round(current_slow, 2),
+            ema200=round(current_ema200, 2),
             rsi=round(current_rsi, 2),
             atr=round(current_atr, 2),
             vol_ratio=round(vol_ratio, 4),
             avg_volume=round(avg_volume, 2),
             current_volume=round(current_vol, 2),
             current_price=round(current_price, 2),
+            trend_strength=round(trend_strength, 4),
+            adx=round(adx_val, 2),
+            plus_di=round(plus_di_val, 2),
+            minus_di=round(minus_di_val, 2),
+            macd=round(macd_line, 4),
+            macd_signal=round(signal_line, 4),
+            macd_histogram=round(histogram, 4),
+            bb_upper=round(bb_upper, 2),
+            bb_middle=round(bb_middle, 2),
+            bb_lower=round(bb_lower, 2),
+            bb_width=round(bb_width, 4),
             uptrend=current_fast > current_slow,
             price_above_slow=current_price > current_slow,
             low_volatility=vol_ratio < self.vol_threshold,
@@ -131,7 +176,6 @@ class ConservativeStrategy:
             volume_ok=current_vol > avg_volume * 0.5,
             downtrend=current_fast < current_slow,
             rsi_overbought=current_rsi > 75,
-            trend_strength=round(trend_strength, 4),
         )
 
     async def on_tick(self, md: MarketData) -> list[Signal]:
@@ -268,3 +312,108 @@ class ConservativeStrategy:
                 rsi[i + 1] = 100.0 - (100.0 / (1.0 + rs))
 
         return rsi
+
+    @staticmethod
+    def _adx(
+        highs: list[float], lows: list[float], closes: list[float], period: int
+    ) -> tuple[float, float, float]:
+        """Average Directional Index. Returns (ADX, +DI, -DI)."""
+        n = min(len(highs), len(lows), len(closes))
+        if n < period + 1 or period <= 0:
+            return (0.0, 0.0, 0.0)
+
+        plus_dm: list[float] = []
+        minus_dm: list[float] = []
+        tr: list[float] = []
+
+        for i in range(1, n):
+            up_move = highs[i] - highs[i - 1]
+            down_move = lows[i - 1] - lows[i]
+            plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+            minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+            tr.append(
+                max(
+                    highs[i] - lows[i],
+                    abs(highs[i] - closes[i - 1]),
+                    abs(lows[i] - closes[i - 1]),
+                )
+            )
+
+        if len(tr) < period:
+            return (0.0, 0.0, 0.0)
+
+        alpha = 1.0 / period
+        smoothed_tr = sum(tr[:period])
+        smoothed_plus = sum(plus_dm[:period])
+        smoothed_minus = sum(minus_dm[:period])
+
+        dx_values: list[float] = []
+
+        for i in range(period, len(tr)):
+            smoothed_tr = smoothed_tr - smoothed_tr * alpha + tr[i]
+            smoothed_plus = smoothed_plus - smoothed_plus * alpha + plus_dm[i]
+            smoothed_minus = smoothed_minus - smoothed_minus * alpha + minus_dm[i]
+
+            pdi = (smoothed_plus / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+            mdi = (smoothed_minus / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+            di_sum = pdi + mdi
+            dx = (abs(pdi - mdi) / di_sum * 100) if di_sum > 0 else 0.0
+            dx_values.append(dx)
+
+        if not dx_values:
+            return (0.0, 0.0, 0.0)
+
+        if len(dx_values) < period:
+            adx = sum(dx_values) / len(dx_values)
+        else:
+            adx = sum(dx_values[:period]) / period
+            for i in range(period, len(dx_values)):
+                adx = (adx * (period - 1) + dx_values[i]) / period
+
+        final_pdi = (smoothed_plus / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+        final_mdi = (smoothed_minus / smoothed_tr * 100) if smoothed_tr > 0 else 0.0
+
+        return (adx, final_pdi, final_mdi)
+
+    @staticmethod
+    def _macd(
+        closes: list[float],
+        fast_period: int = 12,
+        slow_period: int = 26,
+        signal_period: int = 9,
+    ) -> tuple[float, float, float]:
+        """MACD. Returns (macd_line, signal_line, histogram)."""
+        if len(closes) < slow_period + signal_period:
+            return (0.0, 0.0, 0.0)
+
+        fast_ema = ConservativeStrategy._ema(closes, fast_period)
+        slow_ema = ConservativeStrategy._ema(closes, slow_period)
+
+        macd_line = [f - s for f, s in zip(fast_ema, slow_ema)]
+        signal_ema = ConservativeStrategy._ema(macd_line, signal_period)
+
+        current_macd = macd_line[-1]
+        current_signal = signal_ema[-1]
+        current_histogram = current_macd - current_signal
+
+        return (current_macd, current_signal, current_histogram)
+
+    @staticmethod
+    def _bollinger_bands(
+        closes: list[float], period: int = 20, num_std: float = 2.0
+    ) -> tuple[float, float, float, float]:
+        """Bollinger Bands. Returns (upper, middle, lower, width)."""
+        if len(closes) < period:
+            p = closes[-1] if closes else 0.0
+            return (p, p, p, 0.0)
+
+        window = closes[-period:]
+        middle = sum(window) / period
+        variance = sum((x - middle) ** 2 for x in window) / period
+        std = variance**0.5
+
+        upper = middle + num_std * std
+        lower = middle - num_std * std
+        width = ((upper - lower) / middle) if middle > 0 else 0.0
+
+        return (upper, middle, lower, width)

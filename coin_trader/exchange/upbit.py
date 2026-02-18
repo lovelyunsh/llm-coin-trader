@@ -199,6 +199,12 @@ class UpbitAdapter(BaseExchangeAdapter):
                 out[self.normalize_symbol(market_str)] = t
         return out
 
+    async def get_order(self, order_id: str) -> JsonObject:
+        params: QueryParams = {"uuid": order_id}
+        headers = self._auth_headers(params)
+        result = await self._request("GET", "/order", params=params, headers=headers)
+        return _as_str_object_dict(result) or {}
+
     async def get_orderbook(self, symbol: str) -> JsonObject:
         market = self.denormalize_symbol(symbol)
         result = await self._request("GET", "/orderbook", params={"markets": market})

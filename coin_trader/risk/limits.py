@@ -25,6 +25,9 @@ class RiskLimits:
     futures_enabled: bool = False
     max_leverage: int = 1
     max_slippage_bps: int = 50
+    max_single_coin_exposure_pct: Decimal = Decimal("25")
+    max_alt_total_exposure_pct: Decimal = Decimal("70")
+    atr_stop_multiplier: Decimal = Decimal("1.5")
 
 
 DEFAULT_LIMITS = RiskLimits()
