@@ -207,6 +207,8 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 @app.get("/api/status")
 async def get_status() -> JSONResponse:
+    from coin_trader.exchange.base import get_api_metrics
+
     kill_switch: KillSwitch | None = _components.get("kill_switch")
     settings: Settings | None = _components.get("settings")
 
@@ -224,6 +226,7 @@ async def get_status() -> JSONResponse:
             "uptime_seconds": uptime,
             "exchange": settings.exchange.value if settings else "unknown",
             "symbols": settings.trading_symbols if settings else [],
+            "exchange_api": get_api_metrics(),
         }
     )
 
@@ -233,7 +236,7 @@ async def get_status() -> JSONResponse:
 # ---------------------------------------------------------------------------
 async def _trading_loop() -> None:
     global _is_trading
-    from coin_trader.main import _run_tick
+    from coin_trader.main import _fetch_batch_tickers, _refresh_dynamic_symbols, _run_tick
 
     settings: Settings = _components["settings"]
     engine: Any = _components.get("engine")
@@ -265,11 +268,19 @@ async def _trading_loop() -> None:
             except Exception:
                 pass
 
-            for symbol in settings.trading_symbols:
+            active_symbols = await _refresh_dynamic_symbols(_components)
+            exchange_adapter = _components.get("exchange_adapter")
+            batched_tickers = await _fetch_batch_tickers(exchange_adapter, active_symbols)
+
+            for symbol in active_symbols:
                 if not _is_trading:
                     break
                 try:
-                    await _run_tick(_components, symbol)
+                    await _run_tick(
+                        _components,
+                        symbol,
+                        prefetched_ticker=batched_tickers.get(symbol),
+                    )
                 except Exception:
                     pass
             if _is_trading:
@@ -539,6 +550,32 @@ def _read_decision_logs(symbol: str | None = None, limit: int = 50) -> list[dict
     return entries[:limit]
 
 
+def _read_symbol_decision_logs(limit: int = 200) -> list[dict[str, Any]]:
+    import json as _json
+
+    settings: Settings | None = _components.get("settings")
+    log_dir = settings.log_dir if settings else Path("logs")
+    file_path = log_dir / "symbol_decisions.jsonl"
+    if not file_path.exists():
+        return []
+
+    entries: list[dict[str, Any]] = []
+    try:
+        lines = file_path.read_text(encoding="utf-8").strip().splitlines()
+        for line in lines[-limit:]:
+            try:
+                row = _json.loads(line)
+                if isinstance(row, dict):
+                    entries.append(row)
+            except _json.JSONDecodeError:
+                pass
+    except Exception:
+        return []
+
+    entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return entries[:limit]
+
+
 @app.get("/api/decisions")
 async def get_decisions() -> JSONResponse:
     async def _load() -> dict[str, Any]:
@@ -561,6 +598,19 @@ async def get_decisions_by_symbol(symbol_path: str) -> JSONResponse:
 
     payload = await _cached_api_response(
         f"decisions_symbol:{symbol}",
+        _API_CACHE_TTL_SLOW_SEC,
+        _load,
+    )
+    return JSONResponse(payload)
+
+
+@app.get("/api/symbol-decisions")
+async def get_symbol_decisions() -> JSONResponse:
+    async def _load() -> dict[str, Any]:
+        return {"symbol_decisions": _read_symbol_decision_logs(limit=300)}
+
+    payload = await _cached_api_response(
+        "symbol_decisions",
         _API_CACHE_TTL_SLOW_SEC,
         _load,
     )

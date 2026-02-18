@@ -11,7 +11,7 @@ class RiskLimits:
     """Hardcoded risk parameters - IMMUTABLE at runtime"""
 
     max_position_size_pct: Decimal = Decimal("10")
-    max_positions: int = 5
+    max_positions: int = 10
     daily_max_drawdown_pct: Decimal = Decimal("5")
     stop_loss_pct: Decimal = Decimal("3")
     take_profit_pct: Decimal = Decimal("10")

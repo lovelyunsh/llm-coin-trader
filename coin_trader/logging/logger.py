@@ -23,6 +23,7 @@ from coin_trader.logging.redaction import redact_sensitive_data
 
 EVENT_FILE_MAP = {
     "decision": "decisions.jsonl",
+    "symbol_decision": "symbol_decisions.jsonl",
     "order": "orders.jsonl",
     "fill": "fills.jsonl",
     "balance": "balances.jsonl",

@@ -11,6 +11,40 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 
+_API_METRICS: dict[str, object] = {
+    "total_requests": 0,
+    "total_429": 0,
+    "last_429_ts": None,
+    "per_endpoint": {},
+}
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def get_api_metrics() -> dict[str, object]:
+    per_endpoint_raw = _API_METRICS.get("per_endpoint", {})
+    per_endpoint = dict(per_endpoint_raw) if isinstance(per_endpoint_raw, dict) else {}
+    return {
+        "total_requests": _to_int(_API_METRICS.get("total_requests", 0), 0),
+        "total_429": _to_int(_API_METRICS.get("total_429", 0), 0),
+        "last_429_ts": _API_METRICS.get("last_429_ts"),
+        "per_endpoint": per_endpoint,
+    }
+
+
 class BaseExchangeAdapter:
     JsonObject: TypeAlias = dict[str, object]
     JsonArray: TypeAlias = list[object]
@@ -59,11 +93,26 @@ class BaseExchangeAdapter:
                     json=json,
                     headers=headers,
                 )
+                _API_METRICS["total_requests"] = (
+                    _to_int(_API_METRICS.get("total_requests", 0), 0) + 1
+                )
+                per_endpoint_raw = _API_METRICS.get("per_endpoint", {})
+                per_endpoint: dict[str, int]
+                if isinstance(per_endpoint_raw, dict):
+                    per_endpoint = cast(dict[str, int], per_endpoint_raw)
+                else:
+                    per_endpoint = {}
+                endpoint_key = f"{method.upper()} {url}"
+                per_endpoint[endpoint_key] = per_endpoint.get(endpoint_key, 0) + 1
+                _API_METRICS["per_endpoint"] = per_endpoint
                 self._last_request_time = asyncio.get_running_loop().time()
 
                 if response.status_code != 429:
                     response.raise_for_status()
                     return cast(BaseExchangeAdapter.Json, response.json())
+
+                _API_METRICS["total_429"] = _to_int(_API_METRICS.get("total_429", 0), 0) + 1
+                _API_METRICS["last_429_ts"] = asyncio.get_running_loop().time()
 
                 retry_after = response.headers.get("Retry-After")
                 retry_wait = 1.0

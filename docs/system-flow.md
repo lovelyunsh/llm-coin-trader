@@ -85,11 +85,12 @@ _build_system(settings)
 _main_loop(settings)
 │
 └── while True:
-    ├── for symbol in trading_symbols:
-    │   # ["BTC/KRW","ETH/KRW","XRP/KRW","ADA/KRW","SOL/KRW"]
+    ├── 동적 심볼 유니버스 갱신(기본 1시간)
+    ├── 활성 심볼 배치 ticker 조회
+    ├── for symbol in active_symbols:
     │   └── _run_tick(components, symbol)
     │
-    └── sleep(market_data_interval_sec)  # 30초
+    └── sleep(market_data_interval_sec)  # 기본 60초
 ```
 
 ---
@@ -113,7 +114,8 @@ _run_tick(components, "BTC/KRW")
 │   │   (알려진 거래 심볼은 배치 조회, 기타 코인은 개별 조회)
 │   ├── 성공 → anomaly_monitor.record_api_success()
 │   └── 실패 →
-│       ├── anomaly_monitor.record_api_failure()
+│       ├── 429(Too Many Requests)면 실패 누적 없이 틱 스킵
+│       ├── 그 외 오류: anomaly_monitor.record_api_failure()
 │       ├── 연속 실패 임계값(5회) 도달 시:
 │       │   ├── safety_event 저장
 │       │   ├── kill_switch 활성화
@@ -146,8 +148,9 @@ _run_tick(components, "BTC/KRW")
 │  ── 전략 시그널 생성 (참고 데이터) ─────────────────
 │
 ├── [4] 캔들 데이터 업데이트
-│   ├── exchange_adapter.get_candles(symbol, "minutes/60", count=200)
+│   ├── 초기 또는 만료 시점에만 get_candles(symbol, "minutes/60", count=200)
 │   └── strategy.update_candles(symbol, candles)
+│      (기본 갱신 주기: CANDLE_REFRESH_INTERVAL_SEC=3600)
 │
 ├── [5] 전략 시그널 생성 (LLM 참고용)
 │   └── strategy.on_tick(md) → signals: [Signal, ...]
@@ -241,6 +244,30 @@ _run_tick(components, "BTC/KRW")
         ├── 해당 심볼 보유 포지션 순회
         ├── OrderIntent 생성 (전량 매도)
         └── engine.execute(intent, state)
+```
+
+---
+
+## 3.1 동적 심볼 유니버스 선발
+
+```
+_refresh_dynamic_symbols()
+│
+├── KRW 마켓 목록 조회 (/market/all)
+├── 배치 ticker 조회 (/ticker?markets=...)
+├── 1차 필터: 거래대금 최소치
+├── 후보 K 계산: min(20, max(12, 3*top_n))
+├── 하드 필터:
+│   ├── spread_bps <= DYNAMIC_SYMBOL_MAX_SPREAD_BPS
+│   ├── abs(change_24h_pct) <= DYNAMIC_SYMBOL_MAX_ABS_CHANGE_24H_PCT
+│   └── intraday_range_pct <= DYNAMIC_SYMBOL_MAX_INTRADAY_RANGE_PCT
+├── LLM 최종 선발(top_n)
+│   ├── candidates: 신규 후보 지표
+│   └── active_symbols: 현재 활성 심볼 지표(강제유지 제외)
+├── 강제유지 결합:
+│   ├── ALWAYS_KEEP_SYMBOLS
+│   └── 현재 보유 심볼
+└── 최종 심볼 cap: DYNAMIC_SYMBOL_MAX_SYMBOLS(기본 10)
 ```
 
 ---
@@ -461,20 +488,22 @@ FastAPI + Jinja2 (포트 8932)
 │   ├── GET  /api/orders/open          → 미체결 주문
 │   ├── GET  /api/safety-events        → 안전 이벤트
 │   ├── GET  /api/decisions            → 전체 AI 결정 (10개씩 페이지네이션)
-│   └── GET  /api/decisions/{symbol}   → 코인별 AI 결정
+│   ├── GET  /api/decisions/{symbol}   → 코인별 AI 결정
+│   └── GET  /api/symbol-decisions     → AI 심볼 선발 로그
 │
 ├── 수동 거래
 │   ├── POST /api/orders/manual-buy    → 수동 매수 {symbol, amount_krw}
 │   └── POST /api/orders/manual-sell   → 수동 매도 {symbol}
 │
 └── 클라이언트 자동 갱신
-    ├── 10초: 상태, 잔고, 포지션, 손익, 미체결 주문
+    ├── 15초: 상태, 잔고, 포지션, 손익, 미체결 주문
     └── 30초: 전체 주문, 안전 이벤트, AI 결정
 
 대시보드 주요 기능:
 ├── 포지션 테이블: 심볼, 수량, 평균진입가, 현재가, 평가금액,
 │                 미실현손익, 미실현손익률, 전량매도 버튼
 ├── AI 판단 로그: 코인별 필터, reasoning 모달 팝업
+├── AI 심볼 판단 로그: 선발 이력, LLM 사유 모달, 프롬프트(P)
 └── 프롬프트 확인: "P" 버튼으로 LLM에 전달된 프롬프트 조회
 ```
 

@@ -5,17 +5,18 @@ LLM이 주도하는 암호화폐 자동거래 시스템입니다. 모의투자�
 ## 주요 특징
 
 - **LLM 주도 의사결정**: LLM(gpt-5.2, ChatGPT Codex OAuth)이 매매를 직접 결정. BUY_CONSIDER = 매수, SELL_CONSIDER = 매도
+- **동적 심볼 유니버스**: 1시간마다 KRW 마켓 후보를 필터링하고 LLM이 최종 거래 심볼을 선발
 - **전략 시그널은 참고 데이터**: EMA, RSI, ATR 시그널은 LLM에 전달되는 참고 정보일 뿐, 단독으로 주문을 내지 않음
 - **포지션 보호**: 하드 손절(-10% 자동 시장가 매도), 소프트 손절(-5%~-10% LLM 판단), 익절(+10%+ LLM 판단), 트레일링 스탑
 - **안전 최우선**: Kill Switch, 이상징후 감지, 서킷브레이커
-- **웹 대시보드**: 포트 8932, 마스터 코드 인증, 수동 매수/매도, AI 판단 로그, 프롬프트 확인
+- **웹 대시보드**: 포트 8932, 마스터 코드 인증, 수동 매수/매도, AI 판단 로그, AI 심볼 판단 로그, 프롬프트 확인
 - **업비트 지원**: 업비트 거래소 API 연동 (JWT 인증)
 
 ## 거래 심볼
 
-```
-BTC/KRW, ETH/KRW, XRP/KRW, ADA/KRW, SOL/KRW
-```
+- 기본은 `TRADING_SYMBOLS` 초기값을 사용해 시작합니다.
+- 동적 심볼 선택이 활성화되면 `DYNAMIC_SYMBOL_REFRESH_SEC` 주기로 유니버스를 재선정합니다.
+- `ALWAYS_KEEP_SYMBOLS`와 현재 보유 심볼은 강제 유지됩니다.
 
 ## 아키텍처
 
@@ -80,6 +81,21 @@ LLM은 자문이 아니라 **주도적 의사결정자**입니다.
         - LLM 활성화 + advice None (스킵/오류): HOLD
         - LLM 비활성화: 전략 따름
     → 주문 실행 (SELL은 레이트 리밋, 일일 주문 한도 우회)
+```
+
+## 동적 심볼 유니버스 (LLM 선발)
+
+기본값 기준: 1시간마다 재선정, 최종 5개 선발(`DYNAMIC_SYMBOL_TOP_K=5`), 전체 심볼 cap 10(`DYNAMIC_SYMBOL_MAX_SYMBOLS=10`).
+
+```
+1) KRW 마켓 전체 조회 + 배치 ticker 수집
+2) 거래대금 최소치 필터(DYNAMIC_SYMBOL_MIN_KRW_24H)
+3) 후보 K 계산: min(20, max(12, 3*top_n))
+4) 하드 필터(스프레드/24h 변동/일중 변동폭)
+5) LLM이 최종 top_n 선발
+   - candidates: 신규 후보 지표
+   - active_symbols: 현재 활성 심볼 지표(코어 제외)
+6) 최종 활성 심볼 = 강제유지(ALWAYS_KEEP + 보유) + LLM 선발, max_symbols 이내
 ```
 
 ### LLM 입력 데이터
@@ -165,9 +181,10 @@ docker run -d --name coin-trader -p 8932:8932 \
 | 수동 매수 | 심볼 선택 + KRW 금액 입력 |
 | 수동 매도 | 포지션별 "전량 매도" 버튼 |
 | AI 판단 로그 | 코인별 필터, 10개씩 페이지네이션, reasoning 모달, "P" 버튼으로 프롬프트 확인 |
+| AI 심볼 판단 로그 | 10개씩 페이지네이션, LLM 사유 클릭 모달, "P" 버튼으로 유니버스 프롬프트 확인 |
 | 전체 주문내역 | 10개씩 페이지네이션 |
 
-자동 갱신: 상태/잔고/포지션/손익/미체결 주문 10초, 주문/안전/결정 30초.
+자동 갱신: 상태/잔고/포지션/손익/미체결 주문 15초, 주문/안전/결정 30초.
 
 ## API 엔드포인트
 
@@ -190,6 +207,7 @@ docker run -d --name coin-trader -p 8932:8932 \
 | GET | `/api/safety-events` | 안전 이벤트 로그 |
 | GET | `/api/decisions` | 전체 AI 결정 로그 |
 | GET | `/api/decisions/{symbol}` | 코인별 AI 결정 로그 |
+| GET | `/api/symbol-decisions` | AI 심볼 선발 로그 |
 | GET | `/api/pnl` | 손익 요약 |
 
 ## 설정 (.env)
@@ -207,7 +225,22 @@ EXCHANGE=upbit
 TRADING_SYMBOLS=["BTC/KRW","ETH/KRW","XRP/KRW","ADA/KRW","SOL/KRW"]
 
 # 시장 데이터 갱신 주기 (초) - 틱 간격
-MARKET_DATA_INTERVAL_SEC=30
+MARKET_DATA_INTERVAL_SEC=60
+
+# 캔들 갱신 주기 (초)
+CANDLE_REFRESH_INTERVAL_SEC=3600
+
+# 동적 심볼 유니버스
+DYNAMIC_SYMBOL_SELECTION_ENABLED=true
+DYNAMIC_SYMBOL_REFRESH_SEC=3600
+DYNAMIC_SYMBOL_TOP_K=5
+DYNAMIC_SYMBOL_MAX_SYMBOLS=10
+DYNAMIC_SYMBOL_MIN_KRW_24H=1000000000
+DYNAMIC_SYMBOL_BATCH_SIZE=80
+DYNAMIC_SYMBOL_MAX_SPREAD_BPS=80
+DYNAMIC_SYMBOL_MAX_ABS_CHANGE_24H_PCT=20
+DYNAMIC_SYMBOL_MAX_INTRADAY_RANGE_PCT=30
+ALWAYS_KEEP_SYMBOLS=BTC/KRW,ETH/KRW
 
 # 웹 대시보드 마스터 코드
 WEB_MASTER_CODE=your-master-code-here
@@ -249,6 +282,7 @@ logs/decisions_btc_krw.jsonl
 logs/decisions_eth_krw.jsonl
 logs/decisions_xrp_krw.jsonl
 ...
+logs/symbol_decisions.jsonl
 ```
 
 연속 HOLD가 1시간 초과 시 첫 번째와 마지막만 남기고 압축됩니다. LLM 스킵 결정(가격 변화 < 1% + 30분 미경과)은 로그에 기록되지 않습니다.

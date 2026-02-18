@@ -199,6 +199,24 @@ class UpbitAdapter(BaseExchangeAdapter):
                 out[self.normalize_symbol(market_str)] = t
         return out
 
+    async def get_krw_markets(self) -> list[str]:
+        result = await self._request("GET", "/market/all", params={"isDetails": "false"})
+        if not isinstance(result, list):
+            return []
+
+        symbols: list[str] = []
+        for item in result:
+            m = _as_str_object_dict(item)
+            if m is None:
+                continue
+            market = m.get("market")
+            if not isinstance(market, str):
+                continue
+            if not market.startswith("KRW-"):
+                continue
+            symbols.append(self.normalize_symbol(market))
+        return symbols
+
     async def get_order(self, order_id: str) -> JsonObject:
         params: QueryParams = {"uuid": order_id}
         headers = self._auth_headers(params)
