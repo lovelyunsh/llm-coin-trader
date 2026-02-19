@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import urllib.request
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from collections.abc import Mapping
 from pathlib import Path
@@ -108,74 +109,105 @@ class LLMAdvisor:
 
     SYSTEM_PROMPT: str = """You are the PRIMARY decision maker for an automated crypto trading system on Upbit (KRW pairs).
 
-You will receive:
-- Market data (OHLCV, 24h change, timeframe)
-- Technical indicators (1h): EMA(12/26/200), RSI, ATR, ADX(+DI/-DI), MACD(line/signal/histogram), Bollinger Bands(upper/middle/lower/width)
-- BTC trend filter (BTC price vs EMA200, RSI, ADX)
-- Current symbol position (if held): quantity, entry price, unrealized P&L, portfolio weight
+INPUT DATA:
+- Market data: OHLCV, 24h change, timeframe
+- Technical indicators (1h): EMA(12/26), ema200_1h (200-period on 1h candles, ~8-day MA — NOT the daily EMA200), RSI, ATR, ADX(+DI/-DI), MACD(line/signal/hist), Bollinger Bands
+- BTC trend (daily timeframe): price vs EMA200 (true 200-day), RSI, ADX
+- Current position: quantity, entry price, unrealized P&L, weight
 - Decision context: new_entry / add_position / reduce_position / risk_management
-- Recent price structure: higher_high, higher_low, lower_high, lower_low, range_market
-- Volume context: volume_vs_avg_ratio, volume_trend (increasing/decreasing/flat)
-- Portfolio exposure (per-coin %, alt total %)
-- Risk context (ATR stop distance, exposure limits)
-- All positions, account balance, recent orders, recent candles
+- Price structure: higher_high, higher_low, lower_high, lower_low, range_market
+- Volume: volume_vs_avg_ratio, volume_trend
+- Portfolio exposure, risk context, positions, balance, recent orders/candles
+- Current KST time (Korean Standard Time)
+- NOTE: The last candle in Recent Candles is synthetic (built from current ticker price). Its volume is unreliable — do NOT use the last candle's volume for decisions. Use earlier candles for volume analysis.
 
-Your output MUST be valid JSON with these fields:
-- action: one of \"HOLD\", \"BUY_CONSIDER\", \"SELL_CONSIDER\"
-- confidence: float between 0.0 and 1.0
-- reasoning: brief explanation (max 500 chars)
-- risk_notes: any risk concerns (max 300 chars)
-- buy_pct: optional float percent for BUY size (0-10). If omitted, system default is used.
-- sell_pct: optional float percent for SELL size (0-100). If omitted, system default is used.
+OUTPUT: Valid JSON with these fields:
+- action: "HOLD" | "BUY_CONSIDER" | "SELL_CONSIDER"
+- confidence: float 0.0-1.0 (see CONFIDENCE SCALE)
+- reasoning: Korean explanation (max 500 chars)
+- risk_notes: Korean risk concerns (max 300 chars)
+- buy_pct: percent of available KRW to use for BUY (0-10). Omit for system default.
+- sell_pct: percent of held quantity to sell (0-100). Omit for system default.
+
+CONFIDENCE SCALE (strictly follow):
+- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup.
+- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment.
+- 0.5-0.6: Moderate. 2 indicators confirmed but some conflict. Small position only.
+- 0.3-0.4: Weak signal. Uncertain or conflicting. HOLD is usually appropriate.
+- 0.0-0.2: No conviction. Insufficient data or fully conflicting signals.
 
 YOUR AUTHORITY:
-- Your decision IS the trading decision. BUY_CONSIDER = system will buy. SELL_CONSIDER = system will sell.
-- For positions at -5% to -10% loss: SELL_CONSIDER = sell, HOLD = keep holding.
-- For positions at +10%+ profit: Only explicit HOLD keeps the position; otherwise it sells.
+- BUY_CONSIDER = system will execute buy. SELL_CONSIDER = system will execute sell.
+- Positions at -5% to -10% loss: SELL_CONSIDER = sell, HOLD = keep holding (your call).
+- Positions at +10%+ profit: only explicit HOLD keeps the position; otherwise auto-sell.
 - Hard stop-loss at -10% is automatic and bypasses you entirely.
 
 DECISION FRAMEWORK (follow this order strictly):
-1. DATA CHECK: Verify data consistency. If positions show suspicious P&L or prices seem wrong, note in risk_notes.
-2. TIMEFRAME: All indicators are based on the timeframe specified in market data. Interpret accordingly.
-3. BTC FILTER: Check btc_trend. If BTC is below EMA200 with ADX rising and -DI > +DI (downtrend strengthening), block new alt buys. If BTC RSI < 40 and falling, increase caution.
-4. POSITION CHECK: Check current_symbol_position. If null → new entry evaluation. If held → consider decision_context (add_position / reduce_position / risk_management). Avoid repeated buys into already heavy positions.
-5. ADX TREND FILTER: If ADX < 20, market is ranging — avoid trend-following entries. If ADX > 25, trend strategies are valid. Check +DI vs -DI for direction.
-6. MACD + RSI MOMENTUM: Histogram increasing = momentum accelerating. MACD crossing above signal = bullish. RSI >70 = overbought caution, <30 = potential entry. Combine both for momentum direction.
-7. BOLLINGER BANDS: Band squeeze (low bb_width) = volatility expansion imminent. Price near upper band + declining volume = potential reversal. Price bouncing off lower band + rising volume = potential entry.
-8. RECENT STRUCTURE: Check higher_high/higher_low (uptrend structure), lower_high/lower_low (downtrend structure), range_market. Align entries with structure direction.
-9. VOLUME TREND: volume_trend "increasing" with breakout = strong signal. "decreasing" during rally = weak, potential reversal. volume_vs_avg_ratio < 0.5 = low conviction move.
-10. ATR RISK: Use atr_stop_distance as reference for stop-loss sizing. Higher ATR = wider stops needed = smaller position size.
-11. PORTFOLIO CHECK: Respect exposure limits. If single coin > max_single_coin_exposure_pct, do NOT buy more. If alt_total > max_alt_total_exposure_pct, do NOT buy alts.
-12. FINAL DECISION: Synthesize all above into BUY_CONSIDER / SELL_CONSIDER / HOLD with confidence level.
+1. DATA CHECK: Verify data consistency. Flag suspicious P&L or prices in risk_notes.
+2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
+3. BTC FILTER (daily): BTC below daily EMA200 + ADX rising + -DI > +DI = block new alt buys. BTC RSI < 40 = increase caution.
+4. POSITION CHECK: null = new entry evaluation. If held = follow decision_context. Do NOT add to already heavy positions.
+5. ADX TREND: ADX < 20 = ranging, avoid trend entries. ADX > 25 = trend valid. Check +DI vs -DI for direction.
+6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought, < 30 = potential entry.
+7. BOLLINGER: Band squeeze = volatility expansion imminent. Upper band + declining volume = reversal risk. Lower band + rising volume = entry opportunity.
+8. PRICE STRUCTURE: higher_high/higher_low = uptrend. lower_high/lower_low = downtrend. Only enter aligned with structure.
+9. VOLUME: "increasing" + breakout = strong. "decreasing" + rally = weak reversal risk. ratio < 0.5 = low conviction.
+10. ATR RISK: Use atr_stop_distance for stop sizing. Higher ATR = smaller position.
+11. PORTFOLIO: Single coin > max_single_coin_exposure_pct = no more buys. alt_total > max = no alt buys.
+12. FINAL: Synthesize all above into action + confidence.
+
+CONTEXT RULES:
+- new_entry: Require at least 3 confirming factors (trend + momentum + structure).
+- add_position: Stricter than new_entry. Only add if conviction exceeds initial entry.
+- reduce_position: Check if MACD histogram supports further gains before holding.
+- risk_management: Cut early if ADX + MACD trend is against you.
 
 GUIDELINES:
-- Be decisive. Multiple confirming signals = high confidence. Conflicting signals = HOLD.
-- Factor in recent order history to avoid overtrading.
-- High confidence (>0.8) only with strong multi-indicator confirmation.
-- If action is BUY_CONSIDER, include buy_pct (0-10) based on conviction and volatility.
-- If action is SELL_CONSIDER, include sell_pct (0-100) based on risk urgency.
-- For risk_management context: cut early if trend (ADX + MACD) is against you.
-- For reduce_position context: consider if momentum (MACD histogram) supports further gains.
-- For new_entry: require at least 3 confirming factors (trend + momentum + structure).
-- For add_position: be stricter than new_entry — only add if conviction is higher than initial entry.
+- Be decisive. Multiple confirmations = high confidence. Conflicting signals = HOLD.
+- Check recent order history to avoid overtrading.
+- Consider KST time: Korean trading is most active 09:00-24:00, low liquidity at night.
+- Stay consistent with prior decisions unless market conditions have materially changed.
 
-LANGUAGE: Write "reasoning" and "risk_notes" in Korean (한국어). Be concise and natural."""
+LANGUAGE: Write "reasoning" and "risk_notes" in Korean. Be concise and natural."""
 
-    UNIVERSE_SYSTEM_PROMPT: str = """You select tradable symbols for a KRW crypto bot.
+    UNIVERSE_SYSTEM_PROMPT: str = """You are the symbol selector for a KRW crypto trading bot on Upbit.
 
-You receive a candidate list with per-symbol metrics. Your task is portfolio construction, not trade entry timing.
+ROLE: Select the best tradable symbols for the next 1-hour window. Focus on tradability and quality, not entry timing.
 
-Selection rules:
-- Return exactly top_n symbols unless candidates are fewer.
-- Prefer liquid symbols with healthy trend/momentum and acceptable spread.
-- Avoid overheated one-candle spikes and thin/erratic symbols.
-- Keep diversity; do not cluster all picks into one very correlated micro-theme.
-- Existing held symbols should be respected unless quality is clearly weak.
+INPUT DATA:
+- candidates: Symbol candidates with per-symbol metrics
+- active_symbols: Currently active non-core symbols with metrics
+- held_positions: Currently held positions with unrealized P&L
+- core_symbols: Always-kept symbols (e.g. BTC/KRW, ETH/KRW) - do NOT include these in your selection
+- btc_trend: Current BTC market regime on daily timeframe (price vs daily EMA200, RSI, ADX, +DI/-DI)
+- previous_selections: Recent selection history for continuity
 
-Output JSON fields:
-- selected_symbols: array of symbol strings (e.g. ["XRP/KRW", "SOL/KRW"])
-- reasoning: concise Korean explanation (max 300 chars)
-"""
+CANDIDATE METRICS:
+- change_24h_pct: 24h price change (%). Positive = up, negative = down.
+- intraday_range_pct: Today's (high-low)/price (%). Measures intraday volatility.
+- distance_from_high_pct: Distance from 24h high (%). 0 = at high, higher = pulled back.
+- spread_bps: Bid-ask spread in basis points. Lower = more liquid.
+- turnover_24h_krw: 24h turnover in KRW. Higher = more actively traded.
+- volume_24h: 24h trading volume (coins).
+- price / open: Current and opening price.
+- is_held: Whether this symbol has an open position.
+- was_active: Whether this symbol was in the previous active set.
+
+EVALUATION FRAMEWORK (follow in order):
+1. BTC REGIME (daily): BTC below daily EMA200 + -DI > +DI (bearish) = prefer defensive high-liquidity symbols. BTC strong (above EMA200, RSI > 50) = more aggressive picks OK.
+2. LIQUIDITY: spread_bps < 30 excellent, < 50 acceptable. turnover_24h_krw reflects real money flow.
+3. MOMENTUM: change_24h_pct 1-8% preferred. >15% = chase risk. Slight negative + high turnover = dip opportunity.
+4. VOLATILITY: intraday_range_pct 3-10% = tradable. >15% = high risk. <2% = too quiet.
+5. PULLBACK: distance_from_high_pct 2-10% = healthy pullback. 0% = buying at top. >20% = potentially broken.
+6. HELD POSITIONS: Check held_positions P&L. Losing > -5% = consider dropping. Profitable or mildly negative = keep.
+7. CONTINUITY: was_active symbols have indicator history. Slight preference over brand-new symbols to reduce cold-start cost.
+8. DIVERSITY: Do not cluster picks into one correlated group (e.g. 3 meme coins, 3 L1s). Spread across categories.
+
+OUTPUT JSON:
+- selected_symbols: array of up to top_n symbol strings (e.g. ["XRP/KRW", "SOL/KRW"]). May return fewer if quality threshold not met.
+- reasoning: concise Korean explanation (max 500 chars). Be specific about why each symbol was chosen or rejected.
+
+LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
 
     def __init__(
         self,
@@ -317,6 +349,9 @@ Output JSON fields:
         active_symbols: list[dict[str, object]] | None = None,
         held_symbols: list[str] | None = None,
         core_symbols: list[str] | None = None,
+        btc_trend: dict[str, object] | None = None,
+        held_positions: list[dict[str, object]] | None = None,
+        previous_selections: list[dict[str, object]] | None = None,
     ) -> LLMUniverseDecision | None:
         if self._auth_mode == "api_key" and not self._api_key:
             return None
@@ -329,6 +364,9 @@ Output JSON fields:
             active_symbols=active_symbols or [],
             held_symbols=held_symbols or [],
             core_symbols=core_symbols or [],
+            btc_trend=btc_trend,
+            held_positions=held_positions or [],
+            previous_selections=previous_selections or [],
         )
 
         try:
@@ -557,6 +595,11 @@ Output JSON fields:
         text = item0.get("text")
         return str(text) if text is not None else None
 
+    @staticmethod
+    def _compact(obj: object) -> str:
+        """Serialize to compact JSON (no indent) to save tokens."""
+        return json.dumps(obj, separators=(",", ":"), default=str, ensure_ascii=False)
+
     def _build_prompt(
         self,
         symbol: str,
@@ -577,53 +620,43 @@ Output JSON fields:
         volume_context: dict[str, object] | None = None,
         decision_context: str | None = None,
     ) -> str:
+        _c = self._compact
+        kst = datetime.now(timezone(timedelta(hours=9)))
         parts = [
-            f"Analyze {symbol} for trading decision.\n\nMarket Data:\n{json.dumps(market_summary, indent=2, default=str)}"
+            f"Analyze {symbol} | KST: {kst.strftime('%Y-%m-%d %H:%M')} ({kst.strftime('%A')})",
+            f"\nMarket Data:\n{_c(market_summary)}",
         ]
         if decision_context:
             parts.append(f"\nDecision Context: {decision_context}")
         if current_symbol_position is not None:
-            parts.append(
-                f"\nCurrent Symbol Position:\n{json.dumps(current_symbol_position, indent=2, default=str)}"
-            )
+            parts.append(f"\nCurrent Position:\n{_c(current_symbol_position)}")
         else:
-            parts.append("\nCurrent Symbol Position: null (no position held)")
+            parts.append("\nCurrent Position: null (no position held)")
         if technical_indicators:
-            parts.append(
-                f"\nTechnical Indicators:\n{json.dumps(technical_indicators, indent=2, default=str)}"
-            )
+            parts.append(f"\nTechnical Indicators:\n{_c(technical_indicators)}")
         if recent_structure:
-            parts.append(
-                f"\nRecent Price Structure:\n{json.dumps(recent_structure, indent=2, default=str)}"
-            )
+            parts.append(f"\nPrice Structure:\n{_c(recent_structure)}")
         if volume_context:
-            parts.append(f"\nVolume Context:\n{json.dumps(volume_context, indent=2, default=str)}")
+            parts.append(f"\nVolume:\n{_c(volume_context)}")
         if btc_trend:
-            parts.append(f"\nBTC Trend Filter:\n{json.dumps(btc_trend, indent=2, default=str)}")
+            parts.append(f"\nBTC Trend:\n{_c(btc_trend)}")
         if portfolio_exposure:
-            parts.append(
-                f"\nPortfolio Exposure:\n{json.dumps(portfolio_exposure, indent=2, default=str)}"
-            )
+            parts.append(f"\nPortfolio Exposure:\n{_c(portfolio_exposure)}")
         if risk_context:
-            parts.append(f"\nRisk Context:\n{json.dumps(risk_context, indent=2, default=str)}")
+            parts.append(f"\nRisk Context:\n{_c(risk_context)}")
         if strategy_signals:
-            parts.append(
-                f"\nStrategy Signals:\n{json.dumps(strategy_signals, indent=2, default=str)}"
-            )
+            parts.append(f"\nStrategy Signals:\n{_c(strategy_signals)}")
         if positions:
-            parts.append(f"\nCurrent Positions:\n{json.dumps(positions, indent=2, default=str)}")
+            parts.append(f"\nAll Positions:\n{_c(positions)}")
         if balance_info:
-            parts.append(f"\nAccount Balance:\n{json.dumps(balance_info, indent=2, default=str)}")
+            parts.append(f"\nBalance:\n{_c(balance_info)}")
         if recent_orders:
-            parts.append(f"\nRecent Orders:\n{json.dumps(recent_orders, indent=2, default=str)}")
+            parts.append(f"\nRecent Orders:\n{_c(recent_orders)}")
         if recent_candles:
-            parts.append(
-                f"\nRecent Candles (OHLCV):\n{json.dumps(recent_candles, indent=2, default=str)}"
-            )
+            parts.append(f"\nRecent Candles:\n{_c(recent_candles)}")
         if previous_decisions:
             parts.append(
-                f"\nYour Previous Decisions (oldest→newest):\n{json.dumps(previous_decisions, indent=2, default=str, ensure_ascii=False)}"
-                "\nBe consistent with your prior reasoning unless market conditions have materially changed."
+                f"\nPrevious Decisions (oldest to newest):\n{_c(previous_decisions)}"
             )
         parts.append("\nProvide your analysis as JSON.")
         return "\n".join(parts)
@@ -652,16 +685,37 @@ Output JSON fields:
         active_symbols: list[dict[str, object]],
         held_symbols: list[str],
         core_symbols: list[str],
+        btc_trend: dict[str, object] | None = None,
+        held_positions: list[dict[str, object]] | None = None,
+        previous_selections: list[dict[str, object]] | None = None,
     ) -> str:
-        parts = [
-            "Select tradable symbols for the next refresh window.",
-            f"top_n={top_n}",
-            f"held_symbols={json.dumps(held_symbols, ensure_ascii=False)}",
-            f"core_symbols={json.dumps(core_symbols, ensure_ascii=False)}",
-            f"active_symbols={json.dumps(active_symbols, ensure_ascii=False)}",
-            f"candidates={json.dumps(candidates, ensure_ascii=False)}",
-            "Return JSON only.",
+        _c = self._compact
+        kst = datetime.now(timezone(timedelta(hours=9)))
+        parts: list[str] = [
+            f"=== Symbol Selection (up to {top_n}) | KST: {kst.strftime('%Y-%m-%d %H:%M')} ==="
         ]
+
+        if btc_trend:
+            parts.append(f"\nBTC Regime:\n{_c(btc_trend)}")
+
+        parts.append(f"\nCore (excluded from selection):\n{_c(core_symbols)}")
+
+        if held_positions:
+            parts.append(f"\nHeld Positions:\n{_c(held_positions)}")
+        elif held_symbols:
+            parts.append(f"\nHeld: {_c(held_symbols)}")
+
+        if active_symbols:
+            parts.append(f"\nActive Non-Core:\n{_c(active_symbols)}")
+
+        if previous_selections:
+            parts.append(f"\nPrevious Selections:\n{_c(previous_selections)}")
+
+        parts.append(f"\nCandidates ({len(candidates)}):\n{_c(candidates)}")
+
+        parts.append(
+            f"\nSelect up to {top_n} symbols from candidates. Return fewer if quality threshold not met. JSON only."
+        )
         return "\n".join(parts)
 
     def _parse_universe_response(self, text: str) -> LLMUniverseDecision | None:
@@ -690,8 +744,8 @@ Output JSON fields:
                     out.append(symbol)
             reasoning_raw = data_obj.get("reasoning")
             reasoning = str(reasoning_raw).strip() if reasoning_raw is not None else ""
-            if len(reasoning) > 300:
-                reasoning = reasoning[:300]
+            if len(reasoning) > 500:
+                reasoning = reasoning[:500]
             return LLMUniverseDecision(selected_symbols=out, reasoning=reasoning)
         except Exception:
             return None
