@@ -257,6 +257,13 @@ docker run -d --name coin-trader -p 8932:8932 \
 
 브라우저에서 `http://localhost:8932` 접속 후 `/login` 페이지에서 `WEB_MASTER_CODE`를 입력합니다.
 
+### 인증 보안
+
+- **브루트포스 방어**: IP당 5회 실패 시 5분 잠금 (HTTP 429)
+- **CSRF 보호**: 모든 POST 요청에 Double-submit cookie 패턴 적용
+- **Secure 쿠키**: HTTPS 접속 시 자동 활성화 (HTTP/localhost에서도 정상 작동)
+- **서버측 세션 만료**: 24시간 후 자동 만료 및 정리
+
 | 탭/섹션 | 내용 |
 |---------|------|
 | 시스템 상태 | 거래 모드, Kill Switch, 가동 시간 |
