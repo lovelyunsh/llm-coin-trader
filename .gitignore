@@ -90,3 +90,8 @@ dmypy.json
 
 # Ruff
 .ruff_cache/
+
+# Claude Code
+CLAUDE.md
+.claude/
+.omc/

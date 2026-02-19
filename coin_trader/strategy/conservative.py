@@ -67,8 +67,15 @@ class TechnicalIndicators:
         return dataclasses.asdict(self)
 
     def to_llm_dict(self) -> dict[str, object]:
-        """Return indicators for LLM consumption (raw values only, no booleans)."""
-        return {k: v for k, v in dataclasses.asdict(self).items() if k not in self._BOOL_FLAGS}
+        """Return indicators for LLM consumption (raw values only, no booleans).
+
+        Renames ema200 → ema200_1h to clarify it is computed on 1h candles
+        (~8-day moving average), NOT the traditional 200-day EMA.
+        """
+        d = {k: v for k, v in dataclasses.asdict(self).items() if k not in self._BOOL_FLAGS}
+        if "ema200" in d:
+            d["ema200_1h"] = d.pop("ema200")
+        return d
 
 
 class ConservativeStrategy:

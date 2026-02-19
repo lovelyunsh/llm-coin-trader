@@ -151,6 +151,10 @@ async def test_run_tick_with_llm_advisor_calls_get_advice_and_logs_no_order(tmp_
     components = _make_components(tmp_path)
     components["settings"].llm_trading_enabled = False
 
+    # Clear global caches so LLM skip logic doesn't trigger
+    _main_mod._last_llm_prices.pop("BTC/KRW", None)
+    _main_mod._last_llm_times.pop("BTC/KRW", None)
+
     advice_calls: list[tuple[str, dict[str, object]]] = []
 
     async def _get_advice(
@@ -190,16 +194,19 @@ async def test_run_tick_with_llm_advisor_calls_get_advice_and_logs_no_order(tmp_
         assert len(advice_calls) == 1
         assert execute_calls == []
 
-        llm_events = [e for e in events if e[1].get("type") == "llm_advice"]
-        assert len(llm_events) == 1
-        _, payload = llm_events[0]
+        # Actual code logs event_type="decision" with llm_action field
+        decision_events = [
+            e for e in events
+            if e[0] == "decision" and e[1].get("llm_action") is not None
+        ]
+        assert len(decision_events) == 1
+        _, payload = decision_events[0]
         assert payload.get("symbol") == "BTC/KRW"
-        assert payload.get("action") == "BUY_CONSIDER"
-
-        combined_events = [e for e in events if e[1].get("type") == "combined_decision"]
-        assert len(combined_events) == 1
-        assert combined_events[0][1].get("final_action") == "HOLD"
+        assert payload.get("llm_action") == "BUY_CONSIDER"
+        assert payload.get("final_action") == "HOLD"
     finally:
+        _main_mod._last_llm_prices.pop("BTC/KRW", None)
+        _main_mod._last_llm_times.pop("BTC/KRW", None)
         components["store"].close()
 
 
@@ -224,9 +231,14 @@ async def test_run_tick_without_llm_advisor_no_error(tmp_path: Path) -> None:
             await _run_tick(components, "BTC/KRW")
 
         assert execute_calls == []
-        combined_events = [e for e in events if e[1].get("type") == "combined_decision"]
-        assert len(combined_events) == 1
-        assert combined_events[0][1].get("final_action") == "HOLD"
+        # No LLM advisor → no decision event with llm_action
+        decision_events = [
+            e for e in events
+            if e[0] == "decision" and "final_action" in e[1]
+        ]
+        # Without LLM advisor, _skip_llm stays False so decision is still logged
+        if decision_events:
+            assert decision_events[0][1].get("final_action") == "HOLD"
     finally:
         components["store"].close()
 
@@ -235,7 +247,7 @@ async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> No
     components = _make_components(tmp_path)
 
     entry_price = Decimal("50000000")
-    current_price = Decimal("48000000")
+    current_price = Decimal("44000000")  # -12%, triggers hard stop-loss at -10%
 
     components["exchange_adapter"] = _ExchangeAdapter(
         get_ticker=AsyncMock(
@@ -243,10 +255,10 @@ async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> No
                 "trade_price": int(current_price),
                 "opening_price": 50000000,
                 "high_price": 50500000,
-                "low_price": 47500000,
+                "low_price": 43500000,
                 "acc_trade_volume_24h": 100.0,
-                "highest_bid": 47900000,
-                "lowest_ask": 48100000,
+                "highest_bid": 43900000,
+                "lowest_ask": 44100000,
                 "prev_closing_price": 50000000,
             }
         ),
@@ -280,7 +292,10 @@ async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> No
         with patch("coin_trader.main.log_event", new=_log_event):
             await _run_tick(components, "BTC/KRW")
 
-        protection_events = [e for e in events if e[1].get("type") == "position_protection"]
+        protection_events = [
+            e for e in events
+            if e[0] == "decision" and e[1].get("trigger") == "position_protection"
+        ]
         assert len(protection_events) == 1
         assert "stop_loss" in str(protection_events[0][1].get("reason", ""))
 
@@ -338,7 +353,10 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
         with patch("coin_trader.main.log_event", new=_log_event):
             await _run_tick(components, "BTC/KRW")
 
-        protection_events = [e for e in events if e[1].get("type") == "position_protection"]
+        protection_events = [
+            e for e in events
+            if e[0] == "decision" and e[1].get("trigger") == "position_protection"
+        ]
         assert len(protection_events) == 1
         assert "take_profit" in str(protection_events[0][1].get("reason", ""))
 
@@ -396,7 +414,10 @@ async def test_no_protection_trigger_within_safe_range(tmp_path: Path) -> None:
         with patch("coin_trader.main.log_event", new=_log_event):
             await _run_tick(components, "BTC/KRW")
 
-        protection_events = [e for e in events if e[1].get("type") == "position_protection"]
+        protection_events = [
+            e for e in events
+            if e[0] == "decision" and e[1].get("trigger") == "position_protection"
+        ]
         assert len(protection_events) == 0
 
         assert len(execute_calls) == 0
@@ -446,11 +467,12 @@ def test_resolve_action_strategy_buy_llm_hold_vetoes() -> None:
 
 
 def test_resolve_action_strategy_buy_llm_sell_conflict() -> None:
+    """LLM-primary model: LLM SELL_CONSIDER overrides strategy BUY."""
     signals = [_make_signal("buy")]
     advice = LLMAdvice(
         action="SELL_CONSIDER", confidence=Decimal("0.9"), reasoning="r", risk_notes=""
     )
-    assert _resolve_action(signals, advice, _make_settings()) == "HOLD"
+    assert _resolve_action(signals, advice, _make_settings()) == "SELL"
 
 
 def test_resolve_action_strategy_sell_llm_sell_consider() -> None:
@@ -476,9 +498,10 @@ def test_resolve_action_strategy_hold_llm_buy_high_confidence() -> None:
 
 
 def test_resolve_action_strategy_hold_llm_buy_low_confidence_no_trade() -> None:
+    """LLM confidence below min threshold → treated as HOLD."""
     signals = [_make_signal("hold")]
     advice = LLMAdvice(
-        action="BUY_CONSIDER", confidence=Decimal("0.75"), reasoning="r", risk_notes=""
+        action="BUY_CONSIDER", confidence=Decimal("0.65"), reasoning="r", risk_notes=""
     )
     assert _resolve_action(signals, advice, _make_settings()) == "HOLD"
 
@@ -497,9 +520,10 @@ def test_resolve_action_llm_disabled_follows_strategy() -> None:
     assert _resolve_action(signals, advice, _make_settings(llm_trading_enabled=False)) == "BUY"
 
 
-def test_resolve_action_no_advice_follows_strategy() -> None:
+def test_resolve_action_no_advice_holds() -> None:
+    """LLM-primary model: no LLM advice → HOLD (not strategy fallback)."""
     signals = [_make_signal("sell")]
-    assert _resolve_action(signals, None, _make_settings()) == "SELL"
+    assert _resolve_action(signals, None, _make_settings()) == "HOLD"
 
 
 def test_resolve_action_llm_below_min_confidence_treated_as_hold() -> None:

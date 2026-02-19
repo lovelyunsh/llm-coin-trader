@@ -129,7 +129,7 @@ class RiskManager:
                     f"Single-coin exposure {projected_symbol_pct:.1f}% exceeds limit {self.limits.max_single_coin_exposure_pct}%",
                 )
 
-        # 4. Daily drawdown check
+        # 3. Daily drawdown check (buy only)
         today_pnl = _as_decimal(state.get("today_pnl"), ZERO)
         if is_buy and total_balance > 0:
             drawdown_pct = abs(min(today_pnl, ZERO)) / total_balance * Decimal("100")
@@ -140,7 +140,7 @@ class RiskManager:
                     f"Daily drawdown {drawdown_pct:.1f}% exceeds limit {self.limits.daily_max_drawdown_pct}%",
                 )
 
-        # 5. Rate limit check (buy only)
+        # 4. Rate limit check (buy only)
         cutoff = now - timedelta(seconds=1)
         self._order_timestamps = [t for t in self._order_timestamps if t > cutoff]
         if is_buy and len(self._order_timestamps) >= self.limits.max_orders_per_second:
@@ -148,7 +148,7 @@ class RiskManager:
                 intent, now, f"Rate limit exceeded: {len(self._order_timestamps)}/s"
             )
 
-        # 6. Daily order count (buy only)
+        # 5. Daily order count (buy only)
         if is_buy:
             self._daily_order_count += 1
         if is_buy and self._daily_order_count > self.limits.max_orders_per_day:
@@ -158,13 +158,13 @@ class RiskManager:
                 f"Daily order limit exceeded: {self._daily_order_count}/{self.limits.max_orders_per_day}",
             )
 
-        # 7. Futures check
+        # 6. Futures check
         if not self.limits.futures_enabled:
             symbol_lower = intent.symbol.lower()
             if any(kw in symbol_lower for kw in ("perp", "future", "swap")):
                 return self._reject(intent, now, "Futures/derivatives trading is disabled")
 
-        # 8. Slippage check for limit orders
+        # 7. Slippage check for limit orders
         if is_buy and intent.order_type == OrderType.LIMIT and intent.price:
             market_price = _as_decimal(state.get("market_price"), ZERO)
             if market_price > 0:

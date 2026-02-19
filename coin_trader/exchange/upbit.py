@@ -230,6 +230,24 @@ class UpbitAdapter(BaseExchangeAdapter):
             return {}
         return _as_str_object_dict(result[0]) or {}
 
+    async def get_orderbooks(self, symbols: list[str]) -> dict[str, JsonObject]:
+        """Batch orderbook fetch. Returns {symbol: orderbook_data}."""
+        if not symbols:
+            return {}
+        markets = ",".join(self.denormalize_symbol(s) for s in symbols)
+        result = await self._request("GET", "/orderbook", params={"markets": markets})
+        if not isinstance(result, list):
+            return {}
+        out: dict[str, JsonObject] = {}
+        for item in result:
+            ob = _as_str_object_dict(item)
+            if ob is None:
+                continue
+            market_str = ob.get("market")
+            if isinstance(market_str, str):
+                out[self.normalize_symbol(market_str)] = ob
+        return out
+
     async def get_candles(
         self, symbol: str, interval: str = "minutes/60", count: int = 200
     ) -> list[JsonObject]:
@@ -247,6 +265,9 @@ class UpbitAdapter(BaseExchangeAdapter):
             candle = _as_str_object_dict(item)
             if candle is not None:
                 candles.append(candle)
+        # Upbit returns candles in descending order (newest first).
+        # Reverse to chronological (oldest first) for correct indicator computation.
+        candles.reverse()
         return candles
 
     async def get_deposits(self, limit: int = 100) -> list[JsonObject]:
