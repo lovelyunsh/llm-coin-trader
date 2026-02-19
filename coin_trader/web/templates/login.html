@@ -240,6 +240,9 @@
                 const data = await response.json();
 
                 if (data.ok) {
+                    if (data.csrf_token) {
+                        document.cookie = `ct_csrf=${data.csrf_token}; path=/; samesite=lax; max-age=86400`;
+                    }
                     window.location.href = '/';
                 } else {
                     errorMessage.textContent = data.message || '인증에 실패했습니다. 다시 시도해주세요.';
