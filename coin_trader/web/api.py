@@ -33,9 +33,19 @@ _trading_mode: str = "paper"
 _is_trading: bool = False
 
 _SESSION_COOKIE = "ct_session"
-_valid_sessions: set[str] = set()
+_SESSION_TTL = 86400.0  # 24h server-side expiry
+_valid_sessions: dict[str, float] = {}  # session_id -> created_at (monotonic)
 
 _AUTH_BYPASS_PATHS = frozenset({"/login", "/api/auth/login"})
+
+# --- Brute-force protection ---
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_LOCKOUT_SEC = 300.0  # 5 min lockout after max attempts
+_login_attempts: dict[str, list[float]] = {}  # IP -> list of failure timestamps
+
+# --- CSRF ---
+_CSRF_COOKIE = "ct_csrf"
+_CSRF_HEADER = "x-csrf-token"
 
 _API_CACHE_TTL_FAST_SEC = 10.0
 _API_CACHE_TTL_SLOW_SEC = 30.0
@@ -129,6 +139,50 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 app = FastAPI(title="Coin Trader Dashboard", lifespan=lifespan)
 
 
+def _cleanup_sessions() -> None:
+    """Remove expired server-side sessions."""
+    now = time.monotonic()
+    expired = [sid for sid, ts in _valid_sessions.items() if now - ts > _SESSION_TTL]
+    for sid in expired:
+        del _valid_sessions[sid]
+
+
+def _is_locked_out(ip: str) -> bool:
+    """Check if IP is locked out due to too many failed login attempts."""
+    attempts = _login_attempts.get(ip)
+    if not attempts:
+        return False
+    now = time.monotonic()
+    # Keep only recent attempts within lockout window
+    recent = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SEC]
+    _login_attempts[ip] = recent
+    return len(recent) >= _LOGIN_MAX_ATTEMPTS
+
+
+def _record_failed_attempt(ip: str) -> None:
+    _login_attempts.setdefault(ip, []).append(time.monotonic())
+
+
+def _clear_attempts(ip: str) -> None:
+    _login_attempts.pop(ip, None)
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _is_secure_request(request: Request) -> bool:
+    """Check if request came over HTTPS (directly or via reverse proxy)."""
+    if request.url.scheme == "https":
+        return True
+    if request.headers.get("x-forwarded-proto") == "https":
+        return True
+    return False
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         settings: Settings | None = _components.get("settings")
@@ -141,8 +195,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in _AUTH_BYPASS_PATHS or path.startswith("/static"):
             return await call_next(request)
 
+        # Periodic session cleanup
+        _cleanup_sessions()
+
         session_id = request.cookies.get(_SESSION_COOKIE)
         if session_id and session_id in _valid_sessions:
+            # CSRF check for state-changing methods
+            if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+                csrf_cookie = request.cookies.get(_CSRF_COOKIE, "")
+                csrf_header = request.headers.get(_CSRF_HEADER, "")
+                if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_header):
+                    return JSONResponse({"error": "CSRF token mismatch"}, status_code=403)
             return await call_next(request)
 
         if path.startswith("/api/"):
@@ -168,22 +231,46 @@ async def auth_login(request: Request) -> JSONResponse:
     if not settings or not settings.web_master_code:
         return JSONResponse({"ok": True})
 
+    client_ip = _get_client_ip(request)
+
+    # Brute-force lockout check
+    if _is_locked_out(client_ip):
+        return JSONResponse(
+            {"ok": False, "error": "로그인 시도 횟수 초과. 5분 후 다시 시도하세요."},
+            status_code=429,
+        )
+
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     code = body.get("code", "") if isinstance(body, dict) else ""
 
     if not hmac.compare_digest(str(code), settings.web_master_code):
+        _record_failed_attempt(client_ip)
         return JSONResponse(
             {"ok": False, "error": "인증 코드가 올바르지 않습니다"}, status_code=401
         )
 
-    session_id = secrets.token_urlsafe(32)
-    _valid_sessions.add(session_id)
+    _clear_attempts(client_ip)
 
-    response = JSONResponse({"ok": True})
+    session_id = secrets.token_urlsafe(32)
+    _valid_sessions[session_id] = time.monotonic()
+
+    csrf_token = secrets.token_urlsafe(32)
+    secure = _is_secure_request(request)
+
+    response = JSONResponse({"ok": True, "csrf_token": csrf_token})
     response.set_cookie(
         key=_SESSION_COOKIE,
         value=session_id,
         httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=86400,
+    )
+    response.set_cookie(
+        key=_CSRF_COOKIE,
+        value=csrf_token,
+        httponly=False,  # JS needs to read this
+        secure=secure,
         samesite="lax",
         max_age=86400,
     )
@@ -194,9 +281,10 @@ async def auth_login(request: Request) -> JSONResponse:
 async def auth_logout(request: Request) -> JSONResponse:
     session_id = request.cookies.get(_SESSION_COOKIE)
     if session_id:
-        _valid_sessions.discard(session_id)
+        _valid_sessions.pop(session_id, None)
     response = JSONResponse({"ok": True})
     response.delete_cookie(key=_SESSION_COOKIE)
+    response.delete_cookie(key=_CSRF_COOKIE)
     return response
 
 
