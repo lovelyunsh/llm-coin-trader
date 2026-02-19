@@ -7,10 +7,11 @@ LLM이 주도하는 암호화폐 자동거래 시스템입니다. 모의투자�
 - **LLM 주도 의사결정**: LLM(gpt-5.2, ChatGPT Codex OAuth)이 매매를 직접 결정. BUY_CONSIDER = 매수, SELL_CONSIDER = 매도
 - **동적 심볼 유니버스**: 1시간마다 KRW 마켓 후보를 필터링하고 LLM이 최종 거래 심볼을 선발
 - **전략 시그널은 참고 데이터**: EMA, RSI, ATR 시그널은 LLM에 전달되는 참고 정보일 뿐, 단독으로 주문을 내지 않음
+- **BTC 일봉 EMA200 필터**: BTC 일봉 기준 200일 EMA로 시장 레짐 판단, 알트 매매 시 LLM에 전달
 - **포지션 보호**: 하드 손절(-10% 자동 시장가 매도), 소프트 손절(-5%~-10% LLM 판단), 익절(+10%+ LLM 판단), 트레일링 스탑
 - **안전 최우선**: Kill Switch, 이상징후 감지, 서킷브레이커
-- **웹 대시보드**: 포트 8932, 마스터 코드 인증, 수동 매수/매도, AI 판단 로그, AI 심볼 판단 로그, 프롬프트 확인
-- **업비트 지원**: 업비트 거래소 API 연동 (JWT 인증)
+- **웹 대시보드**: 포트 8932, 마스터 코드 인증(브루트포스 방어, CSRF 보호), 수동 매수/매도, AI 판단 로그, AI 심볼 판단 로그, 프롬프트 확인
+- **업비트 지원**: 업비트 거래소 API 연동 (JWT 인증, 배치 ticker/orderbook)
 
 ## 거래 심볼
 
@@ -29,11 +30,11 @@ coin_trader/
 │   └── models.py               # 도메인 모델 (Position, Order 등)
 ├── exchange/
 │   ├── base.py                 # httpx + tenacity + 레이트 리밋
-│   └── upbit.py                # 업비트 어댑터 (배치 ticker, 입출금 조회)
+│   └── upbit.py                # 업비트 어댑터 (배치 ticker/orderbook, 입출금 조회)
 ├── broker/
 │   ├── paper.py                # 모의투자
 │   └── live.py                 # 실거래 브로커 (배치 ticker, 스테일 캐시 폴백, 순입금)
-├── strategy/conservative.py    # EMA+RSI+ATR (참고 시그널 전용)
+├── strategy/conservative.py    # EMA+RSI+ATR (참고 시그널 전용, ema200_1h로 구분)
 ├── risk/
 │   ├── limits.py               # 불변 리스크 상수
 │   └── manager.py              # 리스크 게이트 (포지션 수 제한 없음, SELL은 레이트/일일 한도 우회)
@@ -54,7 +55,7 @@ coin_trader/
 │   └── redaction.py
 ├── notify/slack.py
 └── web/
-    ├── api.py                  # FastAPI + 인증 미들웨어 + 실거래 자동 시작
+    ├── api.py                  # FastAPI + 인증 미들웨어(브루트포스/CSRF) + 실거래 자동 시작
     └── templates/
         ├── dashboard.html      # 대시보드 (페이지네이션, 모달, 인증)
         └── login.html
@@ -65,13 +66,15 @@ coin_trader/
 LLM은 자문이 아니라 **주도적 의사결정자**입니다.
 
 ```
-틱(30초) → 가격 조회 → strategy.on_tick() → 시그널(참고용)
+틱(60초) → 가격 조회 → strategy.on_tick() → 시그널(참고용)
+    → BTC 일봉 EMA200 트렌드 계산 (15분 캐시, 일봉 1시간마다 갱신)
     → 마지막 LLM 호출 대비 가격 변화 확인
     → 변화 >= 1% 또는 30분 경과:
         → LLM 호출 (이전 5개 결정 포함)
         → 결정 로그 저장 (프롬프트 포함)
     → 그 외: LLM 스킵, advice=None → HOLD
-    → 포지션 보호:
+        ※ 단, 소프트 손절(-5%~-10%) 또는 익절(+10%+) 구간이면 강제 LLM 호출
+    → 포지션 보호 (보호 매도 발생 시 이후 combined 판단 스킵):
         - 하드 손절(-10%): 시장가 매도, LLM 우회
         - 소프트 손절(-5%~-10%): LLM 판단
         - 익절(+10%+): LLM 판단 (HOLD만 유지, 나머지 매도)
@@ -114,6 +117,8 @@ LLM은 자문이 아니라 **주도적 의사결정자**입니다.
 ### LLM 스킵 조건
 
 가격 변화 < 1% **AND** 마지막 LLM 호출 < 30분 전 → LLM 스킵, action = HOLD (전략 폴백 없음)
+
+**예외**: 보유 포지션이 소프트 손절(-5%~-10%) 또는 익절(+10%+) 구간에 있으면 스킵 조건을 무시하고 LLM을 강제 호출합니다.
 
 ## 포지션 보호
 
@@ -172,6 +177,17 @@ docker run -d --name coin-trader -p 8932:8932 \
 ## 웹 대시보드
 
 포트 **8932**, `/login`에서 마스터 코드(`WEB_MASTER_CODE`) 입력 후 쿠키 세션 유지.
+
+### 인증 보안
+
+| 보안 기능 | 설명 |
+|-----------|------|
+| 브루트포스 방어 | IP당 5회 실패 시 5분 잠금 (429 응답) |
+| 타이밍 공격 방어 | `hmac.compare_digest`로 상수 시간 비교 |
+| CSRF 보호 | Double-submit cookie 패턴 (`ct_csrf` 쿠키 + `x-csrf-token` 헤더) |
+| Secure 쿠키 | HTTPS 접속 시 자동으로 `secure=True` 설정 |
+| HttpOnly 세션 | 세션 쿠키 XSS 탈취 불가 |
+| 서버측 세션 만료 | 24시간 TTL, 주기적 자동 정리 |
 
 | 기능 | 설명 |
 |------|------|
@@ -272,6 +288,7 @@ LOG_LEVEL=INFO
 | **이상징후 감지** | API 연속 실패, 잔고 불일치, 가격 이상 감지 |
 | **감사 로그** | 모든 이벤트 SQLite에 영구 기록 |
 | **민감정보 마스킹** | API 키, JWT 토큰 등 로그에서 자동 마스킹 |
+| **웹 인증 보안** | 브루트포스 잠금, CSRF 토큰, Secure 쿠키, 서버측 세션 만료 |
 
 ## 결정 로그 파일
 

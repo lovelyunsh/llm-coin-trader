@@ -188,6 +188,7 @@ _run_tick(components, "BTC/KRW")
 │   │
 │   ├── [스킵 조건 확인]
 │   │   ├── 가격 변화 < 1% AND 마지막 LLM 호출 < 30분 전
+│   │   ├── ※ 예외: 소프트 손절(-5%~-10%) 또는 익절(+10%+) 구간이면 강제 호출
 │   │   └── → advice = None (LLM 스킵, 로그 미기록)
 │   │
 │   ├── [LLM 호출 조건 충족 시]
@@ -219,8 +220,9 @@ _run_tick(components, "BTC/KRW")
 │   │   └── LLM 판단 (SELL_CONSIDER = 매도, HOLD = 유지)
 │   ├── 익절 (+10% 이상 수익):
 │   │   └── LLM 판단 (명시적 HOLD만 유지, 나머지 매도)
-│   └── 트레일링 스탑:
-│       └── 최고점 대비 trailing_stop_pct 하락 시 자동 매도
+│   ├── 트레일링 스탑:
+│   │   └── 최고점 대비 trailing_stop_pct 하락 시 자동 매도
+│   └── ※ 보호 매도 발생 시 protection_sold 플래그 → 이후 combined 판단 스킵 (이중 매도 방지)
 │
 │  ── 액션 결정 ──────────────────────────────────────
 │
@@ -255,6 +257,7 @@ _refresh_dynamic_symbols()
 │
 ├── KRW 마켓 목록 조회 (/market/all)
 ├── 배치 ticker 조회 (/ticker?markets=...)
+├── 배치 orderbook 조회 (/orderbook?markets=...) → 실제 스프레드 계산
 ├── 1차 필터: 거래대금 최소치
 ├── 후보 K 계산: min(20, max(12, 3*top_n))
 ├── 하드 필터:
@@ -394,8 +397,10 @@ LLM은 **주도적 의사결정자**입니다. LLM의 action이 실제 매매를
 │  │                                             │
 │  ├── [프롬프트 구성]                            │
 │  │   ├── 시장 데이터, 기술적 지표               │
+│  │   │   ├── ema200_1h (1h 200봉 ~8일 MA)     │
+│  │   │   └── BTC 일봉 EMA200 트렌드 (200일)   │
 │  │   ├── 보유 포지션, 잔고                      │
-│  │   ├── 최근 주문, 최근 캔들                   │
+│  │   ├── 최근 캔들 (마지막 캔들은 합성, 볼륨 0) │
 │  │   └── 이전 5개 결정                         │
 │  │                                             │
 │  └── [API 호출] query_codex()                  │
@@ -468,10 +473,11 @@ LLM 스킵: 가격 변화 < 1% + 30분 미경과 → 로그 미기록
 ```
 FastAPI + Jinja2 (포트 8932)
 │
-├── 인증
+├── 인증 (브루트포스 방어 + CSRF + Secure 쿠키 + 24h 세션 만료)
 │   ├── GET  /login                    → 로그인 페이지
-│   ├── POST /api/auth/login           → 마스터 코드 인증 (쿠키 세션)
-│   └── GET  /                         → 대시보드 (인증 필요)
+│   ├── POST /api/auth/login           → 마스터 코드 인증 (IP당 5회 실패 시 5분 잠금)
+│   │   └── 성공 시: 세션 쿠키(httponly) + CSRF 토큰 쿠키 발급
+│   └── GET  /                         → 대시보드 (인증 필요, POST 시 CSRF 헤더 검증)
 │
 ├── 시스템 제어
 │   ├── GET  /api/status               → 시스템 상태
@@ -520,7 +526,7 @@ coin_trader/
 │   └── models.py               # 도메인 모델 (Position, Order 등)
 ├── exchange/
 │   ├── base.py                 # httpx + tenacity + 레이트 리밋
-│   └── upbit.py                # 업비트 어댑터 (배치 ticker, 입출금 조회)
+│   └── upbit.py                # 업비트 어댑터 (배치 ticker/orderbook, 입출금 조회)
 ├── broker/
 │   ├── paper.py                # 모의투자 브로커
 │   └── live.py                 # 실거래 브로커 (배치 ticker, 스테일 캐시 폴백, 순입금)
@@ -549,7 +555,7 @@ coin_trader/
 ├── notify/
 │   └── slack.py                # Slack 알림
 └── web/
-    ├── api.py                  # FastAPI + 인증 미들웨어 + 실거래 자동 시작
+    ├── api.py                  # FastAPI + 인증 미들웨어(브루트포스/CSRF) + 실거래 자동 시작
     └── templates/
         ├── dashboard.html      # 대시보드 (페이지네이션, 모달, 인증)
         └── login.html          # 로그인 페이지
