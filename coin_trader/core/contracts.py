@@ -19,7 +19,7 @@ from .models import (
     RiskDecisionRecord,
     SafetyEvent,
     Signal,
-)
+)  # noqa: F401 — PositionSide used in type hints below
 
 
 class IStrategy(ABC):
@@ -95,6 +95,10 @@ class IExchangeAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_tickers(self, symbols: list[str]) -> dict[str, dict[str, object]]:
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_orderbook(self, symbol: str) -> dict[str, object]:
         raise NotImplementedError
 
@@ -109,6 +113,26 @@ class IExchangeAdapter(ABC):
     @abstractmethod
     def denormalize_symbol(self, symbol: str) -> str:
         raise NotImplementedError
+
+    @abstractmethod
+    async def get_tradeable_markets(self) -> list[str]:
+        raise NotImplementedError
+
+    # Futures-only methods (default NotImplementedError for spot adapters)
+    async def set_leverage(self, symbol: str, leverage: int) -> None:
+        raise NotImplementedError("set_leverage not supported by this adapter")
+
+    async def set_margin_mode(self, symbol: str, mode: str) -> None:
+        raise NotImplementedError("set_margin_mode not supported by this adapter")
+
+    async def get_funding_rate(self, symbol: str) -> dict[str, object]:
+        raise NotImplementedError("get_funding_rate not supported by this adapter")
+
+    async def get_positions(self) -> list[dict[str, object]]:
+        raise NotImplementedError("get_positions not supported by this adapter")
+
+    async def get_mark_price(self, symbol: str) -> Decimal:
+        raise NotImplementedError("get_mark_price not supported by this adapter")
 
 
 class IStateStore(ABC):

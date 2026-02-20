@@ -80,9 +80,11 @@ class LiveBroker:
         exchange: ExchangeName,
         exchange_adapter: _ExchangeAdapter,
         trading_symbols: list[str] | None = None,
+        quote_currency: str = "KRW",
     ) -> None:
         self.exchange = exchange
         self.adapter = exchange_adapter
+        self._quote_currency: str = quote_currency
         self._trading_currencies: set[str] = set()
         if trading_symbols:
             for s in trading_symbols:
@@ -102,7 +104,7 @@ class LiveBroker:
             ref_price = intent.price
             if ref_price is None:
                 ticker = await self.adapter.get_ticker(intent.symbol)
-                ref_price = Decimal(str(ticker.get("trade_price", ticker.get("price", 0))))
+                ref_price = Decimal(str(ticker.get("price", 0)))
             if ref_price <= 0:
                 raise ValueError("Invalid reference price for sizing")
             quantity = intent.quote_quantity / ref_price
@@ -355,11 +357,12 @@ class LiveBroker:
             if total > 0:
                 balances[currency] = total
 
-        total_krw = balances.get("KRW", Decimal("0"))
-        coin_currencies = [c for c in balances if c != "KRW" and balances[c] > 0]
+        qc = self._quote_currency
+        total_quote = balances.get(qc, Decimal("0"))
+        coin_currencies = [c for c in balances if c != qc and balances[c] > 0]
 
-        known = [f"{c}/KRW" for c in coin_currencies if c in self._trading_currencies]
-        dust = [f"{c}/KRW" for c in coin_currencies if c not in self._trading_currencies]
+        known = [f"{c}/{qc}" for c in coin_currencies if c in self._trading_currencies]
+        dust = [f"{c}/{qc}" for c in coin_currencies if c not in self._trading_currencies]
 
         tickers: dict[str, Mapping[str, object]] = {}
         if known:
@@ -381,7 +384,7 @@ class LiveBroker:
 
         for currency in coin_currencies:
             qty = balances[currency]
-            symbol = f"{currency}/KRW"
+            symbol = f"{currency}/{qc}"
 
             ticker = tickers.get(symbol)
             if ticker is None:
@@ -389,11 +392,11 @@ class LiveBroker:
                 ticker = cached[1] if cached else None
 
             price = (
-                Decimal(str(ticker.get("trade_price", ticker.get("price", 0))))
+                Decimal(str(ticker.get("price", 0)))
                 if ticker
                 else Decimal("0")
             )
-            total_krw += qty * price
+            total_quote += qty * price
 
             avg_buy_price = Decimal("0")
             for acct in accounts:
@@ -419,7 +422,9 @@ class LiveBroker:
             exchange=self.exchange,
             timestamp=now,
             balances=balances,
-            total_value_krw=total_krw,
+            total_value_krw=total_quote if qc == "KRW" else None,
+            total_value_quote=total_quote,
+            quote_currency=qc,
         )
         self._snapshot_cache = (now_mono, snapshot, positions)
         return snapshot, positions

@@ -66,6 +66,14 @@ class OrderSide(str, Enum):
 class OrderType(str, Enum):
     LIMIT = "limit"
     MARKET = "market"
+    STOP_MARKET = "stop_market"
+    TAKE_PROFIT_MARKET = "take_profit_market"
+
+
+class PositionSide(str, Enum):
+    LONG = "long"
+    SHORT = "short"
+    BOTH = "both"  # one-way mode (hedge mode off)
 
 
 class OrderStatus(str, Enum):
@@ -82,6 +90,8 @@ class SignalType(str, Enum):
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
+    SHORT = "short"
+    COVER = "cover"
 
 
 class RiskDecision(str, Enum):
@@ -145,6 +155,11 @@ class OrderIntent(BaseModel):
     price: Decimal | None = None
     reason: str = Field(...)
     timestamp: datetime = Field(...)
+
+    # Futures fields (optional, defaults preserve spot compatibility)
+    reduce_only: bool = Field(default=False)
+    position_side: PositionSide | None = None  # None = spot
+    stop_price: Decimal | None = None
 
     @model_validator(mode="after")
     def _validate_size(self) -> "OrderIntent":
@@ -221,11 +236,20 @@ class Position(BaseModel):
     current_price: Decimal | None = None
     timestamp: datetime = Field(...)
 
+    # Futures fields (optional, defaults preserve spot compatibility)
+    side: PositionSide = Field(default=PositionSide.LONG)
+    leverage: int = Field(default=1)
+    liquidation_price: Decimal | None = None
+    margin: Decimal | None = None
+    margin_type: str | None = None  # "isolated" or "cross"
+
     @computed_field
     @property
     def unrealized_pnl(self) -> Decimal | None:
         if self.current_price is None:
             return None
+        if self.side == PositionSide.SHORT:
+            return (self.average_entry_price - self.current_price) * self.quantity
         return (self.current_price - self.average_entry_price) * self.quantity
 
     @computed_field
@@ -247,6 +271,8 @@ class BalanceSnapshot(BaseModel):
     timestamp: datetime = Field(...)
     balances: dict[str, Decimal] = Field(...)
     total_value_krw: Decimal | None = None
+    total_value_quote: Decimal | None = None  # normalized total (KRW or USDT)
+    quote_currency: str = Field(default="KRW")
     metadata: dict[str, object] = Field(default_factory=dict)
 
 

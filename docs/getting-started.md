@@ -24,6 +24,7 @@
 | Docker | 최신 버전 |
 | OS | macOS / Linux |
 | 거래소 계정 | 업비트 (API 키 발급 필요, 실거래 시) |
+| 바이낸스 계정 | API 키 발급 필요 (선물 거래 시) |
 | ChatGPT 계정 | LLM OAuth 인증용 |
 
 모의투자(Paper)는 거래소 계정 없이 바로 시작할 수 있습니다.
@@ -205,6 +206,58 @@ echo "ARMED" > RUN/live_mode_token.txt
 - [ ] `data/.auth/openai-oauth.json`이 존재하는가?
 - [ ] `data/upbit_keys.enc`가 존재하는가?
 - [ ] `RUN/live_mode_token.txt`가 존재하는가?
+
+---
+
+## 5.5 바이낸스 선물 설정
+
+### .env.binance 파일 생성
+
+업비트와 별도의 환경 파일을 생성합니다:
+
+```env
+EXCHANGE=binance
+TRADING_MODE=paper
+TRADING_SYMBOLS=["BTC/USDT","ETH/USDT"]
+BINANCE_TESTNET=true
+FUTURES_ENABLED=true
+QUOTE_CURRENCY=USDT
+BTC_REFERENCE_SYMBOL=BTC/USDT
+ALWAYS_KEEP_SYMBOLS=BTC/USDT,ETH/USDT
+DYNAMIC_SYMBOL_MIN_TURNOVER_24H=10000000
+WEB_MASTER_CODE=your-master-code-here
+LLM_ENABLED=true
+LLM_AUTH_MODE=oauth
+LOG_LEVEL=INFO
+```
+
+### 바이낸스 API 키 발급
+
+1. https://www.binance.com/en/my/settings/api-management 접속
+2. API 키 생성 (USDT-M 선물 권한 활성화, 출금 비활성화 권장)
+3. IP 화이트리스트 설정 권장
+
+### API 키 암호화
+
+```bash
+docker exec -it coin-trader-binance python -m coin_trader.main encrypt-keys --exchange binance
+```
+
+### 바이낸스 컨테이너 실행
+
+```bash
+docker run -d --name coin-trader-binance \
+  --restart unless-stopped -p 8933:8932 \
+  --env-file .env.binance \
+  -v $(pwd)/data-binance:/app/data \
+  -v $(pwd)/logs-binance:/app/logs \
+  -v $(pwd)/RUN-binance:/app/RUN \
+  coin-trader
+```
+
+테스트넷(`BINANCE_TESTNET=true`)에서 충분히 검증한 후 메인넷으로 전환하세요.
+
+접속: `http://localhost:8933`
 
 ---
 
@@ -437,6 +490,14 @@ TRADING_SYMBOLS=["BTC/KRW","ETH/KRW","XRP/KRW","ADA/KRW","SOL/KRW"]
 ### Q: OAuth 토큰이 만료되었습니다
 
 `data/.auth/openai-oauth.json`을 삭제하고 로컬에서 다시 로그인한 후 파일을 서버로 복사하세요.
+
+### Q: 바이낸스 선물 모드가 작동하지 않습니다
+
+아래를 확인하세요:
+1. `.env.binance`에 `EXCHANGE=binance`, `FUTURES_ENABLED=true`
+2. `QUOTE_CURRENCY=USDT`
+3. 테스트넷 모드: `BINANCE_TESTNET=true` (API 키 없이 paper 모드 가능)
+4. 실거래 시: `data/binance_keys.enc` 존재, `RUN-binance/live_mode_token.txt` 존재
 
 ### Q: 데이터를 초기화하고 싶습니다
 

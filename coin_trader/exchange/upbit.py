@@ -43,6 +43,70 @@ def _as_str_object_dict(value: object) -> JsonObject | None:
     return cast(JsonObject, raw)
 
 
+_UPBIT_INTERVAL_MAP: dict[str, str] = {
+    "1m": "minutes/1",
+    "3m": "minutes/3",
+    "5m": "minutes/5",
+    "15m": "minutes/15",
+    "30m": "minutes/30",
+    "1h": "minutes/60",
+    "4h": "minutes/240",
+    "1d": "days",
+    "1w": "weeks",
+    "1M": "months",
+}
+
+
+def _to_upbit_interval(canonical: str) -> str:
+    """Convert canonical interval (e.g. '1h') to Upbit path segment."""
+    return _UPBIT_INTERVAL_MAP.get(canonical, canonical)
+
+
+def _normalize_ticker(raw: JsonObject) -> JsonObject:
+    """Convert Upbit ticker response to canonical field names."""
+    return {
+        "price": raw.get("trade_price", 0),
+        "open": raw.get("opening_price", 0),
+        "high": raw.get("high_price", 0),
+        "low": raw.get("low_price", 0),
+        "volume_24h": raw.get("acc_trade_volume_24h", 0),
+        "bid": raw.get("highest_bid", 0),
+        "ask": raw.get("lowest_ask", 0),
+        "prev_close": raw.get("prev_closing_price", 0),
+        "turnover_24h": raw.get("acc_trade_price_24h", 0),
+        "change_rate": raw.get("signed_change_rate", 0),
+    }
+
+
+def _normalize_candle(raw: JsonObject) -> JsonObject:
+    """Convert Upbit candle response to canonical field names."""
+    return {
+        "open": raw.get("opening_price", 0),
+        "high": raw.get("high_price", 0),
+        "low": raw.get("low_price", 0),
+        "close": raw.get("trade_price", 0),
+        "volume": raw.get("candle_acc_trade_volume", 0),
+    }
+
+
+def _normalize_orderbook(raw: JsonObject) -> JsonObject:
+    """Convert Upbit orderbook response to canonical [[price, qty], ...] format."""
+    units = raw.get("orderbook_units")
+    bids: list[list[object]] = []
+    asks: list[list[object]] = []
+    if isinstance(units, list):
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            bid_p = unit.get("bid_price", 0)
+            bid_s = unit.get("bid_size", 0)
+            ask_p = unit.get("ask_price", 0)
+            ask_s = unit.get("ask_size", 0)
+            bids.append([bid_p, bid_s])
+            asks.append([ask_p, ask_s])
+    return {"bids": bids, "asks": asks}
+
+
 class UpbitAdapter(BaseExchangeAdapter):
     UPBIT_API_URL: str = "https://api.upbit.com/v1"
 
@@ -180,7 +244,8 @@ class UpbitAdapter(BaseExchangeAdapter):
         result = await self._request("GET", "/ticker", params={"markets": market})
         if not isinstance(result, list) or not result:
             return {}
-        return _as_str_object_dict(result[0]) or {}
+        raw = _as_str_object_dict(result[0]) or {}
+        return _normalize_ticker(raw)
 
     async def get_tickers(self, symbols: list[str]) -> dict[str, JsonObject]:
         if not symbols:
@@ -196,10 +261,13 @@ class UpbitAdapter(BaseExchangeAdapter):
                 continue
             market_str = t.get("market")
             if isinstance(market_str, str):
-                out[self.normalize_symbol(market_str)] = t
+                out[self.normalize_symbol(market_str)] = _normalize_ticker(t)
         return out
 
     async def get_krw_markets(self) -> list[str]:
+        return await self.get_tradeable_markets()
+
+    async def get_tradeable_markets(self) -> list[str]:
         result = await self._request("GET", "/market/all", params={"isDetails": "false"})
         if not isinstance(result, list):
             return []
@@ -228,7 +296,8 @@ class UpbitAdapter(BaseExchangeAdapter):
         result = await self._request("GET", "/orderbook", params={"markets": market})
         if not isinstance(result, list) or not result:
             return {}
-        return _as_str_object_dict(result[0]) or {}
+        raw = _as_str_object_dict(result[0]) or {}
+        return _normalize_orderbook(raw)
 
     async def get_orderbooks(self, symbols: list[str]) -> dict[str, JsonObject]:
         """Batch orderbook fetch. Returns {symbol: orderbook_data}."""
@@ -245,26 +314,27 @@ class UpbitAdapter(BaseExchangeAdapter):
                 continue
             market_str = ob.get("market")
             if isinstance(market_str, str):
-                out[self.normalize_symbol(market_str)] = ob
+                out[self.normalize_symbol(market_str)] = _normalize_orderbook(ob)
         return out
 
     async def get_candles(
-        self, symbol: str, interval: str = "minutes/60", count: int = 200
+        self, symbol: str, interval: str = "1h", count: int = 200
     ) -> list[JsonObject]:
-        """Get candle data. interval examples: minutes/1, minutes/60, days"""
+        """Get candle data. Accepts canonical intervals (1h, 1d) or Upbit native (minutes/60, days)."""
+        upbit_interval = _to_upbit_interval(interval)
         market = self.denormalize_symbol(symbol)
         result = await self._request(
             "GET",
-            f"/candles/{interval}",
+            f"/candles/{upbit_interval}",
             params={"market": market, "count": str(min(count, 200))},
         )
         if not isinstance(result, list):
             return []
         candles: list[JsonObject] = []
         for item in result:
-            candle = _as_str_object_dict(item)
-            if candle is not None:
-                candles.append(candle)
+            raw = _as_str_object_dict(item)
+            if raw is not None:
+                candles.append(_normalize_candle(raw))
         # Upbit returns candles in descending order (newest first).
         # Reverse to chronological (oldest first) for correct indicator computation.
         candles.reverse()

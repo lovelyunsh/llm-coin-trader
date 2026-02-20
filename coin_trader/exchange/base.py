@@ -56,7 +56,7 @@ class BaseExchangeAdapter:
     _rate_limit_lock: asyncio.Lock
     _last_request_time: float
 
-    def __init__(self, base_url: str, rate_limit_delay: float = 0.1, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, rate_limit_delay: float = 0.15, timeout: float = 30.0) -> None:
         self.base_url = base_url
         self.rate_limit_delay = rate_limit_delay
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)

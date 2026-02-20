@@ -93,14 +93,16 @@ def _make_components(tmp_path: Path) -> _Components:
     exchange_adapter = _ExchangeAdapter(
         get_ticker=AsyncMock(
             return_value={
-                "trade_price": 50000000,
-                "opening_price": 49500000,
-                "high_price": 51000000,
-                "low_price": 49000000,
-                "acc_trade_volume_24h": 123.45,
-                "highest_bid": 49990000,
-                "lowest_ask": 50010000,
-                "prev_closing_price": 50000000,
+                "price": 50000000,
+                "open": 49500000,
+                "high": 51000000,
+                "low": 49000000,
+                "volume_24h": 123.45,
+                "bid": 49990000,
+                "ask": 50010000,
+                "prev_close": 50000000,
+                "turnover_24h": 0,
+                "change_rate": 0,
             }
         ),
         get_candles=AsyncMock(return_value=[]),
@@ -252,14 +254,16 @@ async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> No
     components["exchange_adapter"] = _ExchangeAdapter(
         get_ticker=AsyncMock(
             return_value={
-                "trade_price": int(current_price),
-                "opening_price": 50000000,
-                "high_price": 50500000,
-                "low_price": 43500000,
-                "acc_trade_volume_24h": 100.0,
-                "highest_bid": 43900000,
-                "lowest_ask": 44100000,
-                "prev_closing_price": 50000000,
+                "price": int(current_price),
+                "open": 50000000,
+                "high": 50500000,
+                "low": 43500000,
+                "volume_24h": 100.0,
+                "bid": 43900000,
+                "ask": 44100000,
+                "prev_close": 50000000,
+                "turnover_24h": 0,
+                "change_rate": 0,
             }
         ),
         get_candles=AsyncMock(return_value=[]),
@@ -313,14 +317,16 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
     components["exchange_adapter"] = _ExchangeAdapter(
         get_ticker=AsyncMock(
             return_value={
-                "trade_price": int(current_price),
-                "opening_price": 50000000,
-                "high_price": 56500000,
-                "low_price": 50000000,
-                "acc_trade_volume_24h": 200.0,
-                "highest_bid": 55900000,
-                "lowest_ask": 56100000,
-                "prev_closing_price": 50000000,
+                "price": int(current_price),
+                "open": 50000000,
+                "high": 56500000,
+                "low": 50000000,
+                "volume_24h": 200.0,
+                "bid": 55900000,
+                "ask": 56100000,
+                "prev_close": 50000000,
+                "turnover_24h": 0,
+                "change_rate": 0,
             }
         ),
         get_candles=AsyncMock(return_value=[]),
@@ -374,14 +380,16 @@ async def test_no_protection_trigger_within_safe_range(tmp_path: Path) -> None:
     components["exchange_adapter"] = _ExchangeAdapter(
         get_ticker=AsyncMock(
             return_value={
-                "trade_price": int(current_price),
-                "opening_price": 50000000,
-                "high_price": 51500000,
-                "low_price": 49500000,
-                "acc_trade_volume_24h": 150.0,
-                "highest_bid": 50900000,
-                "lowest_ask": 51100000,
-                "prev_closing_price": 50000000,
+                "price": int(current_price),
+                "open": 50000000,
+                "high": 51500000,
+                "low": 49500000,
+                "volume_24h": 150.0,
+                "bid": 50900000,
+                "ask": 51100000,
+                "prev_close": 50000000,
+                "turnover_24h": 0,
+                "change_rate": 0,
             }
         ),
         get_candles=AsyncMock(return_value=[]),
