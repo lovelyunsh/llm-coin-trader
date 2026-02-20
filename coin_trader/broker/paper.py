@@ -32,7 +32,7 @@ class _TickerAdapter(Protocol):
         ...
 
 
-DEFAULT_INITIAL_BALANCE_KRW = Decimal("1000000")
+DEFAULT_INITIAL_BALANCE = Decimal("1000000")
 
 
 class PaperBroker:
@@ -40,12 +40,14 @@ class PaperBroker:
         self,
         exchange: ExchangeName,
         exchange_adapter: _TickerAdapter,
-        initial_balance_krw: Decimal = DEFAULT_INITIAL_BALANCE_KRW,
+        initial_balance_krw: Decimal = DEFAULT_INITIAL_BALANCE,
+        quote_currency: str = "KRW",
     ) -> None:
         self.exchange: ExchangeName = exchange
         self.adapter: _TickerAdapter = exchange_adapter
+        self._quote_currency: str = quote_currency
 
-        self.balances: dict[str, Decimal] = {"KRW": initial_balance_krw}
+        self.balances: dict[str, Decimal] = {quote_currency: initial_balance_krw}
         self.open_orders: dict[str, Order] = {}  # client_order_id -> Order
 
         self._orders_by_id: dict[str, Order] = {}
@@ -152,7 +154,7 @@ class PaperBroker:
             self.balances[quote] = available - cost
             self.balances[base] = self.balances.get(base, Decimal("0")) + qty
 
-            if quote == "KRW":
+            if quote == self._quote_currency:
                 self._position_cost_krw[base] = self._position_cost_krw.get(base, Decimal("0")) + cost
 
         else:
@@ -166,7 +168,7 @@ class PaperBroker:
             proceeds = qty * price - fee
             self.balances[quote] = self.balances.get(quote, Decimal("0")) + proceeds
 
-            if quote == "KRW":
+            if quote == self._quote_currency:
                 held_qty = available
                 held_cost = self._position_cost_krw.get(base, Decimal("0"))
                 if held_qty > 0 and held_cost > 0:
@@ -229,7 +231,7 @@ class PaperBroker:
 
     async def _get_price(self, symbol: str) -> Decimal:
         ticker = await self.adapter.get_ticker(symbol)
-        for key in ("trade_price", "last", "last_price", "price"):
+        for key in ("price", "last", "last_price"):
             if key in ticker and ticker.get(key) is not None:
                 return Decimal(str(ticker.get(key)))
         return Decimal("0")
@@ -253,16 +255,17 @@ class PaperBroker:
 
         now = datetime.now(timezone.utc)
         balances = {k: v for k, v in self.balances.items() if v > 0}
+        qc = self._quote_currency
 
-        total_value_krw = balances.get("KRW", Decimal("0"))
+        total_value_quote = balances.get(qc, Decimal("0"))
         for currency, qty in balances.items():
-            if currency == "KRW" or qty <= 0:
+            if currency == qc or qty <= 0:
                 continue
-            symbol = f"{currency}/KRW"
+            symbol = f"{currency}/{qc}"
             try:
                 price = await self._get_price(symbol)
                 if price > 0:
-                    total_value_krw += qty * price
+                    total_value_quote += qty * price
             except Exception:
                 continue
 
@@ -270,7 +273,9 @@ class PaperBroker:
             exchange=self.exchange,
             timestamp=now,
             balances=balances,
-            total_value_krw=total_value_krw,
+            total_value_krw=total_value_quote if qc == "KRW" else None,
+            total_value_quote=total_value_quote,
+            quote_currency=qc,
         )
 
     async def fetch_positions(self) -> list[Position]:
@@ -278,11 +283,12 @@ class PaperBroker:
 
         positions: list[Position] = []
         now = datetime.now(timezone.utc)
+        qc = self._quote_currency
         for currency, qty in self.balances.items():
-            if currency == "KRW" or qty <= 0:
+            if currency == qc or qty <= 0:
                 continue
 
-            symbol = f"{currency}/KRW"
+            symbol = f"{currency}/{qc}"
             try:
                 price = await self._get_price(symbol)
             except Exception:

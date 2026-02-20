@@ -24,10 +24,14 @@ class RiskLimits:
     default_order_type: str = "limit"
     futures_enabled: bool = False
     max_leverage: int = 1
-    max_slippage_bps: int = 50
+    max_slippage_bps: int = 100
     max_single_coin_exposure_pct: Decimal = Decimal("25")
     max_alt_total_exposure_pct: Decimal = Decimal("70")
     atr_stop_multiplier: Decimal = Decimal("1.5")
+    max_notional_per_position: Decimal = Decimal("50000")
+    max_total_notional: Decimal = Decimal("200000")
+    liquidation_warning_threshold_pct: Decimal = Decimal("20")
+    max_funding_rate_bps: int = 50
 
 
 DEFAULT_LIMITS = RiskLimits()

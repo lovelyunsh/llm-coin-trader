@@ -51,6 +51,9 @@ class TechnicalIndicators:
     volume_ok: bool
     downtrend: bool
     rsi_overbought: bool
+    strong_downtrend: bool = False      # downtrend + ADX > 25 + -DI > +DI
+    momentum_bearish: bool = False      # MACD histogram declining + MACD < signal
+    short_reversal_risk: bool = False   # potential upside reversal (for covering shorts)
     _BOOL_FLAGS: ClassVar[frozenset[str]] = frozenset(
         {
             "uptrend",
@@ -60,6 +63,9 @@ class TechnicalIndicators:
             "volume_ok",
             "downtrend",
             "rsi_overbought",
+            "strong_downtrend",
+            "momentum_bearish",
+            "short_reversal_risk",
         }
     )
 
@@ -84,8 +90,8 @@ class ConservativeStrategy:
     Entry conditions (ALL must be true for BUY):
     1. Fast EMA > Slow EMA (uptrend)
     2. Price above Slow EMA (trend confirmation)
-    3. ATR-based volatility below threshold (calm market)
-    4. RSI between 30-65 (not overbought)
+    3. ATR-based volatility below threshold (7% ATR/price ratio)
+    4. RSI between 25-70 (not overbought)
     5. Volume above average (liquidity check)
 
     Exit conditions (ANY triggers SELL):
@@ -100,8 +106,9 @@ class ConservativeStrategy:
         slow_ema_period: int = 26,
         atr_period: int = 14,
         rsi_period: int = 14,
-        volatility_threshold: float = 0.03,  # 3% ATR/price ratio
+        volatility_threshold: float = 0.07,  # 7% ATR/price ratio
         min_confidence: float = 0.6,
+        futures_enabled: bool = False,
     ) -> None:
         self.fast_period: int = fast_ema_period
         self.slow_period: int = slow_ema_period
@@ -109,6 +116,7 @@ class ConservativeStrategy:
         self.rsi_period: int = rsi_period
         self.vol_threshold: float = volatility_threshold
         self.min_confidence: float = min_confidence
+        self._futures_enabled: bool = futures_enabled
         self._candle_history: dict[str, list[Mapping[str, object]]] = {}
 
     def update_candles(self, symbol: str, candles: list[Mapping[str, object]]) -> None:
@@ -120,11 +128,11 @@ class ConservativeStrategy:
         if len(candles) < self.slow_period + 10:
             return None
 
-        closes = [float(str(c.get("trade_price", c.get("close", 0)) or 0)) for c in candles]
-        highs = [float(str(c.get("high_price", c.get("high", 0)) or 0)) for c in candles]
-        lows = [float(str(c.get("low_price", c.get("low", 0)) or 0)) for c in candles]
+        closes = [float(str(c.get("close", 0) or 0)) for c in candles]
+        highs = [float(str(c.get("high", 0) or 0)) for c in candles]
+        lows = [float(str(c.get("low", 0) or 0)) for c in candles]
         volumes = [
-            float(str(c.get("candle_acc_trade_volume", c.get("volume", 0)) or 0)) for c in candles
+            float(str(c.get("volume", 0) or 0)) for c in candles
         ]
 
         if closes[-1] <= 0:
@@ -155,6 +163,12 @@ class ConservativeStrategy:
             (current_fast - current_slow) / current_slow * 100 if current_slow > 0 else 0.0
         )
 
+        current_macd = macd_line
+        current_signal = signal_line
+        strong_downtrend = current_fast < current_slow and adx_val > 25 and minus_di_val > plus_di_val
+        momentum_bearish = histogram < 0 and current_macd < current_signal
+        short_reversal_risk = current_fast > current_slow or current_rsi < 30 or histogram > 0
+
         return TechnicalIndicators(
             fast_ema=round(current_fast, 2),
             slow_ema=round(current_slow, 2),
@@ -179,10 +193,13 @@ class ConservativeStrategy:
             uptrend=current_fast > current_slow,
             price_above_slow=current_price > current_slow,
             low_volatility=vol_ratio < self.vol_threshold,
-            rsi_ok_buy=30 < current_rsi < 65,
+            rsi_ok_buy=25 < current_rsi < 70,
             volume_ok=current_vol > avg_volume * 0.5,
             downtrend=current_fast < current_slow,
             rsi_overbought=current_rsi > 75,
+            strong_downtrend=strong_downtrend,
+            momentum_bearish=momentum_bearish,
+            short_reversal_risk=short_reversal_risk,
         )
 
     async def on_tick(self, md: MarketData) -> list[Signal]:
@@ -231,6 +248,45 @@ class ConservativeStrategy:
                         "slow_ema": indicators.slow_ema,
                         "rsi": indicators.rsi,
                         "reason": reason,
+                    },
+                )
+            ]
+
+        # SHORT signal: strong downtrend AND bearish momentum (conservative, all must be true)
+        if self._futures_enabled and indicators.strong_downtrend and indicators.momentum_bearish:
+            confidence = min(0.9, self.min_confidence + abs(indicators.trend_strength) / 100)
+            if confidence >= self.min_confidence:
+                return [
+                    Signal(
+                        strategy_name="conservative_trend",
+                        symbol=md.symbol,
+                        signal_type=SignalType.SHORT,
+                        timestamp=datetime.now(timezone.utc),
+                        confidence=Decimal(str(round(confidence, 4))),
+                        metadata={
+                            "fast_ema": indicators.fast_ema,
+                            "slow_ema": indicators.slow_ema,
+                            "rsi": indicators.rsi,
+                            "adx": indicators.adx,
+                            "reason": "Strong downtrend with bearish momentum",
+                        },
+                    )
+                ]
+
+        # COVER signal: reversal risk detected (any condition, like SELL pattern)
+        if self._futures_enabled and indicators.short_reversal_risk:
+            return [
+                Signal(
+                    strategy_name="conservative_trend",
+                    symbol=md.symbol,
+                    signal_type=SignalType.COVER,
+                    timestamp=datetime.now(timezone.utc),
+                    confidence=Decimal("0.7"),
+                    metadata={
+                        "fast_ema": indicators.fast_ema,
+                        "slow_ema": indicators.slow_ema,
+                        "rsi": indicators.rsi,
+                        "reason": "Potential upside reversal - cover short",
                     },
                 )
             ]

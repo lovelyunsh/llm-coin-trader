@@ -10,7 +10,7 @@
 │  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────────────┐  │
 │  │ Exchange  │ │  Broker  │ │  Strategy  │ │   LLM Advisory       │  │
 │  │ Adapter   │ │ Paper/   │ │ Conserva-  │ │ OAuth / gpt-5.2      │  │
-│  │ (Upbit)   │ │ Live     │ │ tive       │ │ (주도적 의사결정자)   │  │
+│  │ (Multi)   │ │ Live     │ │ tive       │ │ (주도적 의사결정자)   │  │
 │  └──────────┘ └──────────┘ └────────────┘ └──────────────────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────────────┐  │
 │  │  Risk    │ │ Execution│ │  Kill      │ │  Anomaly             │  │
@@ -61,12 +61,16 @@ _build_system(settings)
 ├── IdempotencyManager 생성 (중복 주문 방지, DB 연동)
 │
 ├── Exchange Adapter 분기
-│   ├── LIVE → KeyManager.decrypt_keys() → UpbitAdapter(인증키)
-│   └── PAPER → UpbitAdapter(빈 키, 공개 API만)
+│   ├── UPBIT + LIVE → UpbitAdapter(인증키)
+│   ├── UPBIT + PAPER → UpbitAdapter(빈 키)
+│   ├── BINANCE + LIVE → BinanceFuturesAdapter(API키, testnet)
+│   └── BINANCE + PAPER → BinanceFuturesAdapter(빈 키, testnet=True)
 │
 ├── Broker 분기
-│   ├── LIVE → LiveBroker (배치 ticker, 스테일 캐시 폴백, 순입금 계산)
-│   └── PAPER → PaperBroker (시뮬레이션, 수수료 0.05%)
+│   ├── UPBIT + LIVE → LiveBroker (배치 ticker, 스테일 캐시 폴백, 순입금 계산)
+│   ├── UPBIT + PAPER → PaperBroker (시뮬레이션, 수수료 0.05%)
+│   ├── BINANCE + LIVE → LiveFuturesBroker
+│   └── BINANCE + PAPER → PaperFuturesBroker
 │
 ├── ExecutionEngine 생성 (Broker + Risk + Idempotency + Store + KillSwitch)
 ├── ConservativeStrategy 생성
@@ -168,6 +172,13 @@ _run_tick(components, "BTC/KRW")
 │       │  │  ① Fast EMA < Slow EMA (추세 반전)       │
 │       │  │  ② RSI > 75 (과매수)                     │
 │       │  ├─────────────────────────────────────────┤
+│       │  │ SHORT 조건 (futures_enabled, 모두 충족): │
+│       │  │  ① 강한 하락 추세 (downtrend + ADX)      │
+│       │  │  ② 모멘텀 약세 (MACD 하락)               │
+│       │  ├─────────────────────────────────────────┤
+│       │  │ COVER 조건 (futures_enabled, 하나라도):  │
+│       │  │  ① 상승 반전 시그널                       │
+│       │  ├─────────────────────────────────────────┤
 │       │  │ 나머지 → HOLD                            │
 │       │  └─────────────────────────────────────────┘
 │       │  ※ 이 시그널은 LLM에 전달되는 참고 데이터.
@@ -202,7 +213,7 @@ _run_tick(components, "BTC/KRW")
 │   │   │       ├── get_reusable_auth() → 토큰 로드/갱신
 │   │   │       └── query_codex() → ChatGPT Codex API (SSE 스트리밍)
 │   │   ├── 응답 → JSON 파싱 → LLMAdvice
-│   │   │   ├── action: HOLD | BUY_CONSIDER | SELL_CONSIDER
+│   │   │   ├── action: HOLD | BUY_CONSIDER | SELL_CONSIDER | SHORT_CONSIDER | COVER_CONSIDER
 │   │   │   ├── confidence: 최소 0.65 이상이어야 실행
 │   │   │   ├── reasoning: 한국어
 │   │   │   └── risk_notes: 한국어
@@ -222,6 +233,10 @@ _run_tick(components, "BTC/KRW")
 │   │   └── LLM 판단 (명시적 HOLD만 유지, 나머지 매도)
 │   ├── 트레일링 스탑:
 │   │   └── 최고점 대비 trailing_stop_pct 하락 시 자동 매도
+│   ├── 숏 포지션 보호 (선물 모드):
+│   │   ├── 하드 손절: 시장가 커버(BUY), LLM 우회
+│   │   ├── 소프트 손절: LLM 판단 (COVER_CONSIDER)
+│   │   └── 트레일링 스탑: 최저점 대비 반등 시 자동 커버
 │   └── ※ 보호 매도 발생 시 protection_sold 플래그 → 이후 combined 판단 스킵 (이중 매도 방지)
 │
 │  ── 액션 결정 ──────────────────────────────────────
@@ -242,9 +257,17 @@ _run_tick(components, "BTC/KRW")
     │   ├── OrderIntent 생성
     │   └── engine.execute(intent, state)
     │
-    └── SELL_CONSIDER (confidence >= 0.65) →
-        ├── 해당 심볼 보유 포지션 순회
-        ├── OrderIntent 생성 (전량 매도)
+    ├── SELL_CONSIDER (confidence >= 0.65) →
+    │   ├── 해당 심볼 보유 포지션 순회
+    │   ├── OrderIntent 생성 (전량 매도)
+    │   └── engine.execute(intent, state)
+    │
+    ├── SHORT_CONSIDER (futures, confidence >= 0.65) →
+    │   ├── SELL to open short, position_side=SHORT
+    │   └── engine.execute(intent, state)
+    │
+    └── COVER_CONSIDER (futures, confidence >= 0.65) →
+        ├── BUY to close short, reduce_only=True
         └── engine.execute(intent, state)
 ```
 
@@ -300,7 +323,11 @@ engine.execute(intent, state)
 │   ├── ③ 초당 주문 제한: BUY에만 적용 (SELL은 항상 통과)
 │   ├── ④ 일일 주문 제한: BUY에만 적용 (SELL은 항상 통과)
 │   ├── ⑤ 선물/파생상품: 비활성화 시 거부
-│   └── ⑥ 슬리피지: 50bps 초과 시 거부
+│   ├── ⑥ 슬리피지: 50bps 초과 시 거부
+│   ├── ⑦ 레버리지 마진 확인: 필요 마진 > 가용 마진 시 거부
+│   ├── ⑧ 노셔널 한도: max_total_notional 초과 시 거부
+│   ├── ⑨ 청산가 근접도: 시장가와 청산가 거리 < threshold 시 거부
+│   └── ⑩ 펀딩비: 고율 펀딩비에서 불리한 방향 진입 차단
 │   │
 │   ├── → RiskDecisionRecord 생성 (APPROVED/REJECTED)
 │   └── → DB 저장 (decisions_log)
@@ -420,7 +447,9 @@ LLM은 **주도적 의사결정자**입니다. LLM의 action이 실제 매매를
 │  ├── JSON 파싱 (```json 코드펜스 처리)          │
 │  └── LLMAdvice 스키마 검증:                    │
 │      ├── action: HOLD | BUY_CONSIDER |         │
-│      │          SELL_CONSIDER                   │
+│      │          SELL_CONSIDER |                 │
+│      │          SHORT_CONSIDER |                │
+│      │          COVER_CONSIDER                  │
 │      ├── confidence: 0.0 ~ 1.0                 │
 │      │   (0.65 미만이면 실행 안 함)             │
 │      ├── reasoning: 한국어, 최대 500자          │
@@ -526,10 +555,13 @@ coin_trader/
 │   └── models.py               # 도메인 모델 (Position, Order 등)
 ├── exchange/
 │   ├── base.py                 # httpx + tenacity + 레이트 리밋
-│   └── upbit.py                # 업비트 어댑터 (배치 ticker/orderbook, 입출금 조회)
+│   ├── upbit.py                # 업비트 어댑터 (정규화, 배치 ticker/orderbook)
+│   └── binance_futures.py      # 바이낸스 USDT-M 선물 어댑터
 ├── broker/
-│   ├── paper.py                # 모의투자 브로커
-│   └── live.py                 # 실거래 브로커 (배치 ticker, 스테일 캐시 폴백, 순입금)
+│   ├── paper.py                # 모의투자 (현물)
+│   ├── live.py                 # 실거래 (현물)
+│   ├── paper_futures.py        # 모의투자 (선물)
+│   └── live_futures.py         # 실거래 (선물)
 ├── strategy/
 │   └── conservative.py         # EMA+RSI+ATR (참고 시그널 전용)
 ├── risk/

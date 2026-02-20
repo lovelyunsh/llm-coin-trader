@@ -1,0 +1,13 @@
+services:
+  coin-trader:
+    build: .
+    container_name: coin-trader
+    restart: unless-stopped
+    ports:
+      - "8932:8932"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./RUN:/app/RUN

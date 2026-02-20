@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -22,6 +23,8 @@ from coin_trader.config.settings import Settings
 from coin_trader.core.models import TradingMode, OrderIntent, OrderSide, OrderType
 from coin_trader.safety.kill_switch import KillSwitch
 from coin_trader.state.store import StateStore
+
+_logger = logging.getLogger("web.api")
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -342,7 +345,7 @@ async def _trading_loop() -> None:
                                 "medium",
                             )
                 except Exception:
-                    pass
+                    _logger.warning("cancel_stale_orders failed", exc_info=True)
 
             try:
                 store: StateStore | None = _components.get("store")
@@ -354,7 +357,7 @@ async def _trading_loop() -> None:
                         for order in updated:
                             store.save_order(order)
             except Exception:
-                pass
+                _logger.warning("order_sync failed", exc_info=True)
 
             active_symbols = await _refresh_dynamic_symbols(_components)
             exchange_adapter = _components.get("exchange_adapter")
@@ -370,7 +373,7 @@ async def _trading_loop() -> None:
                         prefetched_ticker=batched_tickers.get(symbol),
                     )
                 except Exception:
-                    pass
+                    _logger.error("run_tick failed symbol=%s", symbol, exc_info=True)
             if _is_trading:
                 await asyncio.sleep(settings.market_data_interval_sec)
     except asyncio.CancelledError:
@@ -802,7 +805,7 @@ async def manual_buy(request: Request) -> JSONResponse:
             )
 
         ticker = await exchange_adapter.get_ticker(symbol)
-        current_price = Decimal(str(ticker.get("trade_price", 0)))
+        current_price = Decimal(str(ticker.get("price", 0)))
 
         if current_price <= 0:
             return JSONResponse(
@@ -898,7 +901,7 @@ async def manual_sell(request: Request) -> JSONResponse:
             )
 
         ticker = await exchange_adapter.get_ticker(symbol)
-        current_price = Decimal(str(ticker.get("trade_price", 0)))
+        current_price = Decimal(str(ticker.get("price", 0)))
 
         if current_price <= 0:
             return JSONResponse(

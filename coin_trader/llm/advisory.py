@@ -35,6 +35,10 @@ class LLMAdvice:
     risk_notes: str = ""
     buy_pct: Decimal | None = None
     sell_pct: Decimal | None = None
+    short_pct: Decimal | None = None
+    target_price: Decimal | None = None
+    position_side: str = ""
+    order_type: str = "limit"
     _prompt: str = ""
 
     @classmethod
@@ -44,7 +48,8 @@ class LLMAdvice:
             return None
 
         action_raw = str(data.get("action", "HOLD")).upper()
-        if action_raw not in {"HOLD", "BUY_CONSIDER", "SELL_CONSIDER"}:
+        valid_actions = {"HOLD", "BUY_CONSIDER", "SELL_CONSIDER", "SHORT_CONSIDER", "COVER_CONSIDER"}
+        if action_raw not in valid_actions:
             action_raw = "HOLD"
 
         try:
@@ -87,6 +92,34 @@ class LLMAdvice:
             if sell_pct > Decimal("100"):
                 sell_pct = Decimal("100")
 
+        short_pct: Decimal | None = None
+        if "short_pct" in data and data.get("short_pct") is not None:
+            try:
+                short_pct = Decimal(str(data.get("short_pct")))
+            except Exception:
+                return None
+            if short_pct < Decimal("0"):
+                short_pct = Decimal("0")
+            if short_pct > Decimal("100"):
+                short_pct = Decimal("100")
+
+        target_price: Decimal | None = None
+        if "target_price" in data and data.get("target_price") is not None:
+            try:
+                target_price = Decimal(str(data.get("target_price")))
+            except Exception:
+                target_price = None
+            if target_price is not None and target_price <= Decimal("0"):
+                target_price = None
+
+        position_side_raw = str(data.get("position_side", "")).lower().strip()
+        if position_side_raw not in ("long", "short", ""):
+            position_side_raw = ""
+
+        order_type_raw = str(data.get("order_type", "limit")).lower().strip()
+        if order_type_raw not in ("market", "limit"):
+            order_type_raw = "limit"  # default to limit if invalid
+
         return cls(
             action=action_raw,
             confidence=conf,
@@ -94,6 +127,10 @@ class LLMAdvice:
             risk_notes=risk_notes,
             buy_pct=buy_pct,
             sell_pct=sell_pct,
+            short_pct=short_pct,
+            target_price=target_price,
+            position_side=position_side_raw,
+            order_type=order_type_raw,
         )
 
 
@@ -112,9 +149,8 @@ class LLMAdvisor:
 INPUT DATA:
 - Market data: OHLCV, 24h change, timeframe
 - Technical indicators (1h): EMA(12/26), ema200_1h (200-period on 1h candles, ~8-day MA — NOT the daily EMA200), RSI, ATR, ADX(+DI/-DI), MACD(line/signal/hist), Bollinger Bands
-- BTC trend (daily timeframe): price vs EMA200 (true 200-day), RSI, ADX
-- Current position: quantity, entry price, unrealized P&L, weight
-- Decision context: new_entry / add_position / reduce_position / risk_management
+- BTC trend (daily timeframe): price vs EMA200 (true 200-day), RSI, ADX — informational context only
+- Current position: quantity, entry price, unrealized P&L, weight (null = no position)
 - Price structure: higher_high, higher_low, lower_high, lower_low, range_market
 - Volume: volume_vs_avg_ratio, volume_trend
 - Portfolio exposure, risk context, positions, balance, recent orders/candles
@@ -128,45 +164,167 @@ OUTPUT: Valid JSON with these fields:
 - risk_notes: Korean risk concerns (max 300 chars)
 - buy_pct: percent of available KRW to use for BUY (0-10). Omit for system default.
 - sell_pct: percent of held quantity to sell (0-100). Omit for system default.
+- target_price: your desired LIMIT order price for BUY/SELL. Set strategically (e.g. near support for BUY, near resistance for SELL). Omit to use current market price.
+- order_type: "market" or "limit" (default: "limit"). Use "market" for immediate execution certainty, "limit" for better price.
 
-CONFIDENCE SCALE (strictly follow):
-- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup.
-- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment.
-- 0.5-0.6: Moderate. 2 indicators confirmed but some conflict. Small position only.
-- 0.3-0.4: Weak signal. Uncertain or conflicting. HOLD is usually appropriate.
-- 0.0-0.2: No conviction. Insufficient data or fully conflicting signals.
+CONFIDENCE SCALE (strictly follow — minimum 0.65 required for execution):
+- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup. Full position (buy_pct 8-10).
+- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment. Standard position (buy_pct 5-7).
+- 0.65-0.69: Moderate-high conviction. 2-3 indicators confirmed. Acceptable entry with smaller position (buy_pct 3-5).
+- 0.5-0.64: Moderate conviction. Not enough confirmation. System will NOT execute — use HOLD instead.
+- Below 0.5: Low/no conviction. Always HOLD.
+IMPORTANT: Confidence below 0.65 will be rejected by the system. If you are not at least 65% confident, output HOLD instead of a low-confidence BUY_CONSIDER.
 
 YOUR AUTHORITY:
 - BUY_CONSIDER = system will execute buy. SELL_CONSIDER = system will execute sell.
 - Positions at -5% to -10% loss: SELL_CONSIDER = sell, HOLD = keep holding (your call).
 - Positions at +10%+ profit: only explicit HOLD keeps the position; otherwise auto-sell.
 - Hard stop-loss at -10% is automatic and bypasses you entirely.
+- Quality over quantity: 1 high-conviction trade beats 5 mediocre ones. Fees (0.05% each way) eat into small gains.
 
 DECISION FRAMEWORK (follow this order strictly):
 1. DATA CHECK: Verify data consistency. Flag suspicious P&L or prices in risk_notes.
 2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
-3. BTC FILTER (daily): BTC below daily EMA200 + ADX rising + -DI > +DI = block new alt buys. BTC RSI < 40 = increase caution.
-4. POSITION CHECK: null = new entry evaluation. If held = follow decision_context. Do NOT add to already heavy positions.
-5. ADX TREND: ADX < 20 = ranging, avoid trend entries. ADX > 25 = trend valid. Check +DI vs -DI for direction.
+3. BTC CONTEXT (daily): BTC trend data is INFORMATIONAL ONLY. It provides market sentiment context but must NEVER block an altcoin trade. BTC below EMA200 or RSI < 40 = note it in risk_notes and consider slightly smaller buy_pct, but proceed with the trade if the altcoin's own indicators are strong. Each coin is evaluated on its own merit.
+4. POSITION CHECK: null = new entry evaluation. If held = evaluate from indicators and P&L data. Do NOT add to already heavy positions.
+5. ADX TREND: ADX < 20 = ranging, reduce confidence. ADX > 25 = trend valid. Check +DI vs -DI for direction.
 6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought, < 30 = potential entry.
 7. BOLLINGER: Band squeeze = volatility expansion imminent. Upper band + declining volume = reversal risk. Lower band + rising volume = entry opportunity.
-8. PRICE STRUCTURE: higher_high/higher_low = uptrend. lower_high/lower_low = downtrend. Only enter aligned with structure.
-9. VOLUME: "increasing" + breakout = strong. "decreasing" + rally = weak reversal risk. ratio < 0.5 = low conviction.
+8. PRICE STRUCTURE: higher_high/higher_low = uptrend. lower_high/lower_low = downtrend. Prefer entries aligned with structure, but counter-trend entries are acceptable at key support levels.
+9. VOLUME: "increasing" + breakout = strong. "decreasing" + rally = weak reversal risk. ratio < 0.5 = reduce confidence.
 10. ATR RISK: Use atr_stop_distance for stop sizing. Higher ATR = smaller position.
 11. PORTFOLIO: Single coin > max_single_coin_exposure_pct = no more buys. alt_total > max = no alt buys.
-12. FINAL: Synthesize all above into action + confidence.
+12. RECENT ORDERS: Check if this coin was recently bought. Avoid adding to a position bought within the last 30 minutes. Check for recent sells at similar prices — avoid buy-sell-buy churn.
+13. FINAL: Synthesize all above into action + confidence. Prefer fewer, higher-conviction trades.
 
-CONTEXT RULES:
-- new_entry: Require at least 3 confirming factors (trend + momentum + structure).
-- add_position: Stricter than new_entry. Only add if conviction exceeds initial entry.
-- reduce_position: Check if MACD histogram supports further gains before holding.
-- risk_management: Cut early if ADX + MACD trend is against you.
+POSITION-BASED RULES:
+- No position (Current Position: null): Evaluate as fresh entry. Require at least 2 confirming indicators.
+- Holding at a loss: Judge purely from current indicators whether the trend is recovering or deteriorating. Do NOT anchor on the loss itself — a -3% position with improving RSI/MACD may be worth holding.
+- Holding at a profit: Judge whether momentum supports further gains (MACD histogram, volume, ADX). Take partial profit if momentum is fading.
+- Already heavy position (high position_value_pct_of_portfolio): Do NOT add more regardless of indicators.
 
 GUIDELINES:
-- Be decisive. Multiple confirmations = high confidence. Conflicting signals = HOLD.
-- Check recent order history to avoid overtrading.
+- Prioritize trade quality: a well-timed entry with strong confirmation is worth waiting for.
+- Multiple confirmations = high confidence. Conflicting signals = HOLD, not a low-confidence trade.
+- Check recent order history carefully to avoid overtrading and buy-sell churn.
 - Consider KST time: Korean trading is most active 09:00-24:00, low liquidity at night.
 - Stay consistent with prior decisions unless market conditions have materially changed.
+- If previous decisions show a pattern of quick losses, increase entry threshold.
+
+TARGET PRICE RULES:
+- For BUY: Set target_price at or slightly below current price (e.g. near support, recent low, or bid price). Do NOT set too far below — the order will be cancelled if unfilled within 5 minutes.
+- For SELL: Set target_price at or slightly above current price (e.g. near resistance or ask price).
+- Keep target_price within ~1-2% of current price to ensure realistic fills within the 5-minute window.
+- IMPORTANT: All LIMIT orders that remain unfilled for 5 minutes are automatically cancelled. Price your orders to fill.
+- Omit target_price to use the current market price as default.
+
+ORDER TYPE RULES:
+- "limit": Default. Better price control. Specify target_price for optimal entry/exit. Order auto-cancels if unfilled in 5 minutes.
+- "market": Immediate execution at current market price. Use when:
+  * Momentum is strong and you need guaranteed fill (breakout, breakdown)
+  * Selling to cut losses quickly (soft stop-loss zone -5% to -10%)
+  * High confidence (>=0.8) and time-sensitive setup
+  * Volume is high and spread is tight (less slippage risk)
+- Do NOT use "market" for:
+  * Low-liquidity coins (check volume_vs_avg_ratio)
+  * Large positions relative to orderbook depth
+  * Ranging/choppy markets where limit orders can get better fills
+- When order_type is "market", target_price is ignored.
+
+LANGUAGE: Write "reasoning" and "risk_notes" in Korean. Be concise and natural."""
+
+    _FUTURES_SYSTEM_PROMPT: str = """You are the PRIMARY decision maker for an automated crypto trading system on Binance USDT-M perpetual futures.
+
+INPUT DATA:
+- Market data: OHLCV, 24h change, timeframe, mark price, funding rate, leverage
+- Technical indicators (1h): EMA(12/26), ema200_1h (200-period on 1h candles, ~8-day MA — NOT the daily EMA200), RSI, ATR, ADX(+DI/-DI), MACD(line/signal/hist), Bollinger Bands
+- BTC trend (daily timeframe): price vs EMA200 (true 200-day), RSI, ADX
+- Current position: quantity, entry price, unrealized P&L, weight, position_side (long/short), leverage, liquidation price (null = no position)
+- Price structure: higher_high, higher_low, lower_high, lower_low, range_market
+- Volume: volume_vs_avg_ratio, volume_trend
+- Portfolio exposure, risk context, positions, balance, recent orders/candles
+- Current KST time (Korean Standard Time)
+- NOTE: The last candle in Recent Candles is synthetic (built from current ticker price). Its volume is unreliable — do NOT use the last candle's volume for decisions. Use earlier candles for volume analysis.
+
+OUTPUT: Valid JSON with these fields:
+- action: "HOLD" | "BUY_CONSIDER" | "SELL_CONSIDER" | "SHORT_CONSIDER" | "COVER_CONSIDER"
+- confidence: float 0.0-1.0 (see CONFIDENCE SCALE)
+- reasoning: Korean explanation (max 500 chars)
+- risk_notes: Korean risk concerns (max 300 chars)
+- buy_pct: percent of available balance to use for long entry (0-10). Omit for system default.
+- sell_pct: percent of held long quantity to close (0-100). Omit for system default.
+- short_pct: percent of available balance to use for short entry (0-10). Omit for system default.
+- target_price: your desired LIMIT order price for entry/exit. Set strategically (e.g. near support for longs, near resistance for shorts). Omit to use current market price.
+- position_side: "long" or "short" indicating direction of intended trade. Omit if HOLD.
+- order_type: "market" or "limit" (default: "limit"). Use "market" for immediate execution certainty, "limit" for better price.
+
+CONFIDENCE SCALE (strictly follow — minimum 0.65 required for execution):
+- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup. Full position (buy_pct/short_pct 8-10).
+- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment. Standard position (buy_pct/short_pct 5-7).
+- 0.65-0.69: Moderate-high conviction. 2-3 indicators confirmed. Acceptable entry with smaller position (buy_pct/short_pct 3-5).
+- 0.5-0.64: Moderate conviction. Not enough confirmation. System will NOT execute — use HOLD instead.
+- Below 0.5: Low/no conviction. Always HOLD.
+IMPORTANT: Confidence below 0.65 will be rejected by the system. If you are not at least 65% confident, output HOLD instead of a low-confidence trade.
+
+YOUR AUTHORITY:
+- BUY_CONSIDER = open or add long position. SELL_CONSIDER = close or reduce long position.
+- SHORT_CONSIDER = open short position. COVER_CONSIDER = close short position.
+- Positions at -5% to -10% loss: SELL_CONSIDER (long) or COVER_CONSIDER (short) = close, HOLD = keep holding (your call).
+- Positions at +10%+ profit: only explicit HOLD keeps the position; otherwise auto-close.
+- Hard stop-loss at -10% is automatic and bypasses you entirely.
+- Liquidation risk: if mark price approaches liquidation price, always recommend closing.
+- Quality over quantity: 1 high-conviction trade beats 5 mediocre ones. Fees eat into small gains.
+
+DECISION FRAMEWORK (follow this order strictly):
+1. DATA CHECK: Verify data consistency. Flag suspicious P&L, mark price vs entry, or funding rate anomalies in risk_notes.
+2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
+3. BTC CONTEXT (daily): BTC trend data is INFORMATIONAL ONLY. It provides market sentiment context but must NEVER block a trade. BTC below EMA200 or RSI < 40 = note it in risk_notes and consider slightly smaller position size, but proceed with the trade if the coin's own indicators are strong. Each coin is evaluated on its own merit. Strong downtrend may favor shorts.
+4. POSITION CHECK: null = new entry evaluation. If held = evaluate from indicators and P&L data. Do NOT add to already heavy positions.
+5. ADX TREND: ADX < 20 = ranging, reduce confidence. ADX > 25 = trend valid. Check +DI vs -DI for direction.
+6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought (short opportunity), < 30 = potential long entry.
+7. BOLLINGER: Band squeeze = volatility expansion imminent. Upper band + declining volume = reversal risk. Lower band + rising volume = long entry opportunity.
+8. PRICE STRUCTURE: higher_high/higher_low = uptrend (favor longs). lower_high/lower_low = downtrend (favor shorts). Prefer entries aligned with structure, but counter-trend entries are acceptable at key support/resistance levels.
+9. VOLUME: "increasing" + breakout = strong. "decreasing" + rally = weak reversal risk. ratio < 0.5 = reduce confidence.
+10. ATR RISK: Use atr_stop_distance for stop sizing. Higher ATR + leverage = smaller position.
+11. FUNDING RATE: High funding rates (>50bps) against your direction = avoid entry. Extreme positive funding = shorts being paid, consider short. Extreme negative = longs being paid.
+12. PORTFOLIO: Single coin > max_single_coin_exposure_pct = no more adds. Check liquidation distance.
+13. RECENT ORDERS: Check if this coin was recently bought. Avoid adding to a position bought within the last 30 minutes. Check for recent sells at similar prices — avoid churn.
+14. FINAL: Synthesize all above into action + confidence. Prefer fewer, higher-conviction trades.
+
+POSITION-BASED RULES:
+- No position (Current Position: null): Evaluate as fresh entry. Require at least 2 confirming indicators. Factor in leverage risk.
+- Holding at a loss: Judge purely from current indicators whether the trend is recovering or deteriorating. Do NOT anchor on the loss itself. With leverage, losses accelerate — check liquidation distance.
+- Holding at a profit: Judge whether momentum supports further gains (MACD histogram, volume, ADX). Take partial profit if momentum is fading.
+- Already heavy position (high position_value_pct_of_portfolio): Do NOT add more regardless of indicators.
+
+GUIDELINES:
+- Prioritize trade quality: a well-timed entry with strong confirmation is worth waiting for.
+- Multiple confirmations = high confidence. Conflicting signals = HOLD, not a low-confidence trade.
+- Check recent order history carefully to avoid overtrading and churn.
+- Consider KST time: Korean trading is most active 09:00-24:00, low liquidity at night.
+- Stay consistent with prior decisions unless market conditions have materially changed.
+- With leverage, always consider liquidation risk before recommending entry.
+- If previous decisions show a pattern of quick losses, increase entry threshold.
+
+TARGET PRICE RULES:
+- For BUY/LONG: Set target_price at or slightly below current price (e.g. near support or bid). Do NOT set too far below — the order will be cancelled if unfilled within 5 minutes.
+- For SELL/SHORT: Set target_price at or slightly above current price (e.g. near resistance or ask).
+- Keep target_price within ~1-2% of current price to ensure realistic fills within the 5-minute window.
+- IMPORTANT: All LIMIT orders that remain unfilled for 5 minutes are automatically cancelled. Price your orders to fill.
+- Omit target_price to use the current market price as default.
+
+ORDER TYPE RULES:
+- "limit": Default. Better price control. Specify target_price for optimal entry/exit. Order auto-cancels if unfilled in 5 minutes.
+- "market": Immediate execution at current market price. Use when:
+  * Momentum is strong and you need guaranteed fill (breakout, breakdown)
+  * Closing positions to cut losses quickly (soft stop-loss zone -5% to -10%)
+  * High confidence (>=0.8) and time-sensitive setup
+  * Volume is high and spread is tight (less slippage risk)
+- Do NOT use "market" for:
+  * Low-liquidity coins (check volume_vs_avg_ratio)
+  * Large positions relative to orderbook depth
+  * Ranging/choppy markets where limit orders can get better fills
+- When order_type is "market", target_price is ignored.
 
 LANGUAGE: Write "reasoning" and "risk_notes" in Korean. Be concise and natural."""
 
@@ -209,6 +367,45 @@ OUTPUT JSON:
 
 LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
 
+    _FUTURES_UNIVERSE_SYSTEM_PROMPT: str = """You are the symbol selector for a USDT-M futures trading bot on Binance.
+
+ROLE: Select the best tradable symbols for the next 1-hour window. Focus on tradability and quality, not entry timing.
+
+INPUT DATA:
+- candidates: Symbol candidates with per-symbol metrics
+- active_symbols: Currently active non-core symbols with metrics
+- held_positions: Currently held positions with unrealized P&L
+- core_symbols: Always-kept symbols (e.g. BTC/USDT, ETH/USDT) - do NOT include these in your selection
+- btc_trend: Current BTC market regime on daily timeframe (price vs daily EMA200, RSI, ADX, +DI/-DI)
+- previous_selections: Recent selection history for continuity
+
+CANDIDATE METRICS:
+- change_24h_pct: 24h price change (%). Positive = up, negative = down.
+- intraday_range_pct: Today's (high-low)/price (%). Measures intraday volatility.
+- distance_from_high_pct: Distance from 24h high (%). 0 = at high, higher = pulled back.
+- spread_bps: Bid-ask spread in basis points. Lower = more liquid.
+- turnover_24h: 24h turnover in USDT. Higher = more actively traded.
+- volume_24h: 24h trading volume (coins).
+- price / open: Current and opening price.
+- is_held: Whether this symbol has an open position.
+- was_active: Whether this symbol was in the previous active set.
+
+EVALUATION FRAMEWORK (follow in order):
+1. BTC REGIME (daily): BTC below daily EMA200 + -DI > +DI (bearish) = prefer defensive high-liquidity symbols. BTC strong (above EMA200, RSI > 50) = more aggressive picks OK.
+2. LIQUIDITY: spread_bps < 30 excellent, < 50 acceptable. turnover_24h reflects real money flow.
+3. MOMENTUM: change_24h_pct 1-8% preferred. >15% = chase risk. Slight negative + high turnover = dip opportunity.
+4. VOLATILITY: intraday_range_pct 3-10% = tradable. >15% = high risk. <2% = too quiet.
+5. PULLBACK: distance_from_high_pct 2-10% = healthy pullback. 0% = buying at top. >20% = potentially broken.
+6. HELD POSITIONS: Check held_positions P&L. Losing > -5% = consider dropping. Profitable or mildly negative = keep.
+7. CONTINUITY: was_active symbols have indicator history. Slight preference over brand-new symbols to reduce cold-start cost.
+8. DIVERSITY: Do not cluster picks into one correlated group (e.g. 3 meme coins, 3 L1s). Spread across categories.
+
+OUTPUT JSON:
+- selected_symbols: array of up to top_n symbol strings (e.g. ["XRP/USDT", "SOL/USDT"]). May return fewer if quality threshold not met.
+- reasoning: concise Korean explanation (max 500 chars). Be specific about why each symbol was chosen or rejected.
+
+LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
+
     def __init__(
         self,
         api_key: str = "",
@@ -221,6 +418,9 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         oauth_auth_file: Path | None = None,
         oauth_open_browser: bool = True,
         oauth_force_login: bool = False,
+        futures_enabled: bool = False,
+        leverage: int = 1,
+        exchange_context: str = "upbit",
     ) -> None:
         self._api_key: str = api_key
         self._provider: str = provider
@@ -231,6 +431,9 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         self._oauth_auth_file: Path | None = oauth_auth_file
         self._oauth_open_browser: bool = oauth_open_browser
         self._oauth_force_login: bool = oauth_force_login
+        self._futures_enabled: bool = futures_enabled
+        self._leverage: int = leverage
+        self._exchange_context: str = exchange_context
 
         self._rate_lock: asyncio.Lock = asyncio.Lock()
         self._last_call_ts: float = 0.0
@@ -242,6 +445,18 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         else:
             self._base_url = "https://api.openai.com/v1"
 
+    @property
+    def system_prompt(self) -> str:
+        if self._exchange_context == "binance":
+            return self._FUTURES_SYSTEM_PROMPT
+        return self.SYSTEM_PROMPT
+
+    @property
+    def universe_system_prompt(self) -> str:
+        if self._exchange_context == "binance":
+            return self._FUTURES_UNIVERSE_SYSTEM_PROMPT
+        return self.UNIVERSE_SYSTEM_PROMPT
+
     @classmethod
     def create_oauth(
         cls,
@@ -250,7 +465,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         open_browser: bool = True,
         force_login: bool = False,
         timeout: float = 60.0,
-        min_interval_seconds: float = 5.0,
+        min_interval_seconds: float = 10.0,
     ) -> "LLMAdvisor":
         return cls(
             api_key="",
@@ -282,7 +497,6 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         current_symbol_position: dict[str, object] | None = None,
         recent_structure: dict[str, object] | None = None,
         volume_context: dict[str, object] | None = None,
-        decision_context: str | None = None,
     ) -> LLMAdvice | None:
         if self._auth_mode == "api_key" and not self._api_key:
             return None
@@ -303,7 +517,6 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             current_symbol_position=current_symbol_position,
             recent_structure=recent_structure,
             volume_context=volume_context,
-            decision_context=decision_context,
         )
 
         try:
@@ -413,7 +626,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         body = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": self.UNIVERSE_SYSTEM_PROMPT},
+                {"role": "system", "content": self.universe_system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
@@ -446,7 +659,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         }
         body = {
             "model": self._model,
-            "system": self.UNIVERSE_SYSTEM_PROMPT,
+            "system": self.universe_system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
             "temperature": 0.2,
             "max_tokens": 600,
@@ -497,7 +710,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             access_token=auth.access,
             account_id=auth.account_id,
             model=model,
-            system_prompt=self.UNIVERSE_SYSTEM_PROMPT,
+            system_prompt=self.universe_system_prompt,
             user_message=user_prompt,
             timeout=self._timeout,
         )
@@ -536,7 +749,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             access_token=auth.access,
             account_id=auth.account_id,
             model=model,
-            system_prompt=self.SYSTEM_PROMPT,
+            system_prompt=self.system_prompt,
             user_message=user_prompt,
             timeout=self._timeout,
         )
@@ -545,7 +758,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         body = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.3,
@@ -578,7 +791,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         }
         body = {
             "model": self._model,
-            "system": self.SYSTEM_PROMPT,
+            "system": self.system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
             "temperature": 0.3,
             "max_tokens": 500,
@@ -618,7 +831,6 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         current_symbol_position: dict[str, object] | None = None,
         recent_structure: dict[str, object] | None = None,
         volume_context: dict[str, object] | None = None,
-        decision_context: str | None = None,
     ) -> str:
         _c = self._compact
         kst = datetime.now(timezone(timedelta(hours=9)))
@@ -626,8 +838,6 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             f"Analyze {symbol} | KST: {kst.strftime('%Y-%m-%d %H:%M')} ({kst.strftime('%A')})",
             f"\nMarket Data:\n{_c(market_summary)}",
         ]
-        if decision_context:
-            parts.append(f"\nDecision Context: {decision_context}")
         if current_symbol_position is not None:
             parts.append(f"\nCurrent Position:\n{_c(current_symbol_position)}")
         else:

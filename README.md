@@ -11,7 +11,8 @@ LLM이 주도하는 암호화폐 자동거래 시스템입니다. 모의투자�
 - **포지션 보호**: 하드 손절(-10% 자동 시장가 매도), 소프트 손절(-5%~-10% LLM 판단), 익절(+10%+ LLM 판단), 트레일링 스탑
 - **안전 최우선**: Kill Switch, 이상징후 감지, 서킷브레이커
 - **웹 대시보드**: 포트 8932, 마스터 코드 인증(브루트포스 방어, CSRF 보호), 수동 매수/매도, AI 판단 로그, AI 심볼 판단 로그, 프롬프트 확인
-- **업비트 지원**: 업비트 거래소 API 연동 (JWT 인증, 배치 ticker/orderbook)
+- **멀티 거래소**: 업비트(KRW 현물) + 바이낸스(USDT-M 선물) 지원
+- **바이낸스 USDT-M 선물 지원**: 같은 이미지로 업비트(현물)와 바이낸스(선물) 병렬 운영. 숏/커버, 레버리지, 청산가 추적
 
 ## 거래 심볼
 
@@ -30,10 +31,13 @@ coin_trader/
 │   └── models.py               # 도메인 모델 (Position, Order 등)
 ├── exchange/
 │   ├── base.py                 # httpx + tenacity + 레이트 리밋
-│   └── upbit.py                # 업비트 어댑터 (배치 ticker/orderbook, 입출금 조회)
+│   ├── upbit.py                # 업비트 어댑터 (정규화, 배치 ticker/orderbook)
+│   └── binance_futures.py      # 바이낸스 USDT-M 선물 어댑터 (HMAC-SHA256, 테스트넷)
 ├── broker/
-│   ├── paper.py                # 모의투자
-│   └── live.py                 # 실거래 브로커 (배치 ticker, 스테일 캐시 폴백, 순입금)
+│   ├── paper.py                # 모의투자 (현물)
+│   ├── live.py                 # 실거래 브로커 (현물)
+│   ├── paper_futures.py        # 모의투자 (선물, 마진/레버리지/청산)
+│   └── live_futures.py         # 실거래 브로커 (선물)
 ├── strategy/conservative.py    # EMA+RSI+ATR (참고 시그널 전용, ema200_1h로 구분)
 ├── risk/
 │   ├── limits.py               # 불변 리스크 상수
@@ -66,7 +70,7 @@ coin_trader/
 LLM은 자문이 아니라 **주도적 의사결정자**입니다.
 
 ```
-틱(60초) → 가격 조회 → strategy.on_tick() → 시그널(참고용)
+틱(120초) → 가격 조회 → strategy.on_tick() → 시그널(참고용)
     → BTC 일봉 EMA200 트렌드 계산 (15분 캐시, 일봉 1시간마다 갱신)
     → 마지막 LLM 호출 대비 가격 변화 확인
     → 변화 >= 1% 또는 30분 경과:
@@ -109,10 +113,12 @@ LLM은 자문이 아니라 **주도적 의사결정자**입니다.
 
 ### LLM 출력
 
-- `action`: HOLD / BUY_CONSIDER / SELL_CONSIDER
+- `action`: HOLD / BUY_CONSIDER / SELL_CONSIDER / SHORT_CONSIDER / COVER_CONSIDER
 - `confidence`: 최소 0.65 (65%) 이상이어야 실행
 - `reasoning`: 한국어
 - `risk_notes`: 한국어
+
+SHORT_CONSIDER/COVER_CONSIDER는 선물 모드(`FUTURES_ENABLED=true`)에서만 활성화
 
 ### LLM 스킵 조건
 
@@ -128,6 +134,9 @@ LLM은 자문이 아니라 **주도적 의사결정자**입니다.
 | 손실 -5%~-10% (소프트 손절) | LLM 판단 (SELL_CONSIDER = 매도, HOLD = 유지) |
 | 수익 +10% 이상 (익절) | LLM 판단 (명시적 HOLD만 유지, 나머지 매도) |
 | 트레일링 스탑 | 최고점 대비 trailing_stop_pct 하락 시 자동 매도 |
+| 숏 손실 -10% 이상 (하드 손절) | 시장가 자동 커버(BUY), LLM 우회 |
+| 숏 손실 -5%~-10% (소프트 손절) | LLM 판단 (COVER_CONSIDER = 커버, HOLD = 유지) |
+| 숏 트레일링 스탑 | 최저점 대비 반등 trailing_stop_pct 시 자동 커버 |
 
 손절 주문은 LIMIT이 아닌 **MARKET 주문**으로 실행됩니다.
 
@@ -151,6 +160,79 @@ docker run -d --name coin-trader -p 8932:8932 \
 `.env`에 `TRADING_MODE=live`가 설정되어 있으면 컨테이너 재시작 시 실거래가 자동으로 시작됩니다.
 
 실행 후 `http://localhost:8932` 접속 (마스터 코드 로그인 필요).
+
+## 바이낸스 선물 실행 (병렬 운영)
+
+같은 Docker 이미지를 사용하되, 다른 env 파일과 컨테이너 이름으로 병렬 운영합니다.
+
+### .env.binance 설정
+
+```env
+# 거래소
+EXCHANGE=binance
+TRADING_MODE=paper
+
+# 심볼
+TRADING_SYMBOLS=["BTC/USDT","ETH/USDT"]
+ALWAYS_KEEP_SYMBOLS=BTC/USDT,ETH/USDT
+
+# 바이낸스 설정
+BINANCE_TESTNET=true
+BINANCE_KEY_FILE=data/binance_keys.enc
+BINANCE_MASTER_KEY=
+BINANCE_MARGIN_TYPE=isolated
+BINANCE_DEFAULT_LEVERAGE=1
+
+# 선물 활성화
+FUTURES_ENABLED=true
+MAX_LEVERAGE=1
+
+# Quote currency
+QUOTE_CURRENCY=USDT
+BTC_REFERENCE_SYMBOL=BTC/USDT
+
+# 동적 심볼 (USDT 기준 거래대금)
+DYNAMIC_SYMBOL_MIN_TURNOVER_24H=10000000
+
+# LLM/웹/기타는 업비트와 동일하게 설정
+LLM_ENABLED=true
+LLM_AUTH_MODE=oauth
+WEB_MASTER_CODE=your-master-code-here
+LOG_LEVEL=INFO
+```
+
+### Docker 실행
+
+```bash
+# 업비트 (기존, 변경 없음)
+docker run -d --name coin-trader \
+  --restart unless-stopped -p 8932:8932 \
+  --env-file .env \
+  -v $(pwd)/data:/app/data -v $(pwd)/logs:/app/logs -v $(pwd)/RUN:/app/RUN \
+  coin-trader
+
+# 바이낸스 (신규, 별도 포트/데이터)
+docker run -d --name coin-trader-binance \
+  --restart unless-stopped -p 8933:8932 \
+  --env-file .env.binance \
+  -v $(pwd)/data-binance:/app/data -v $(pwd)/logs-binance:/app/logs -v $(pwd)/RUN-binance:/app/RUN \
+  coin-trader
+```
+
+### 바이낸스 API 키 설정
+
+1. https://www.binance.com/en/my/settings/api-management 에서 API 키 발급
+2. USDT-M 선물 거래 권한 활성화 (출금 비활성화 권장)
+3. API 키 암호화:
+```bash
+docker exec -it coin-trader-binance python -m coin_trader.main encrypt-keys --exchange binance
+```
+
+### 테스트넷부터 시작
+
+`BINANCE_TESTNET=true`로 테스트넷에서 먼저 검증한 후, 확인이 되면 `false`로 변경하여 메인넷으로 전환합니다.
+
+접속: `http://localhost:8933` (바이낸스 대시보드)
 
 ### 컨테이너 관리
 
@@ -241,7 +323,7 @@ EXCHANGE=upbit
 TRADING_SYMBOLS=["BTC/KRW","ETH/KRW","XRP/KRW","ADA/KRW","SOL/KRW"]
 
 # 시장 데이터 갱신 주기 (초) - 틱 간격
-MARKET_DATA_INTERVAL_SEC=60
+MARKET_DATA_INTERVAL_SEC=120
 
 # 캔들 갱신 주기 (초)
 CANDLE_REFRESH_INTERVAL_SEC=3600
@@ -268,6 +350,16 @@ LLM_OAUTH_MODEL=gpt-5.2
 
 # 로그 레벨
 LOG_LEVEL=INFO
+
+# 바이낸스 전용 설정 (.env.binance)
+EXCHANGE=binance
+QUOTE_CURRENCY=USDT
+BTC_REFERENCE_SYMBOL=BTC/USDT
+BINANCE_TESTNET=true
+BINANCE_MARGIN_TYPE=isolated
+BINANCE_DEFAULT_LEVERAGE=1
+FUTURES_ENABLED=true
+DYNAMIC_SYMBOL_MIN_TURNOVER_24H=10000000
 ```
 
 전체 설정은 `.env.example` 파일을 참고하세요.
@@ -289,6 +381,7 @@ LOG_LEVEL=INFO
 | **감사 로그** | 모든 이벤트 SQLite에 영구 기록 |
 | **민감정보 마스킹** | API 키, JWT 토큰 등 로그에서 자동 마스킹 |
 | **웹 인증 보안** | 브루트포스 잠금, CSRF 토큰, Secure 쿠키, 서버측 세션 만료 |
+| **선물 리스크 체크** | 레버리지 마진 확인, 노셔널 한도, 청산가 근접도, 펀딩비 체크 |
 
 ## 결정 로그 파일
 
