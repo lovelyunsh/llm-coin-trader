@@ -1052,7 +1052,12 @@
         // Utility functions
         function formatNumber(num) {
             if (num === null || num === undefined) return '0';
-            return Math.round(num).toLocaleString('ko-KR');
+            const n = Number(num);
+            if (n === 0) return '0';
+            const abs = Math.abs(n);
+            if (abs >= 100) return n.toLocaleString('ko-KR', {maximumFractionDigits: 2});
+            if (abs >= 1) return n.toLocaleString('ko-KR', {maximumFractionDigits: 4});
+            return n.toLocaleString('ko-KR', {maximumFractionDigits: 8});
         }
 
         function formatDecimal(num, decimals = 2) {

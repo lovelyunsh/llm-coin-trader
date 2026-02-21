@@ -35,7 +35,7 @@ from coin_trader.core.models import ExchangeName, TradingMode
 class RiskLimits:
     """Hardcoded risk limits - IMMUTABLE at runtime"""
 
-    max_position_size_pct: Decimal = Decimal("10")
+    max_position_size_pct: Decimal = Decimal("30")
     max_positions: int = 10
     daily_max_drawdown_pct: Decimal = Decimal("5")
     soft_stop_loss_pct: Decimal = Decimal("5")
