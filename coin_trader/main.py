@@ -773,7 +773,7 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
                 previous_selections=_previous_universe_selections,
             )
         except Exception:
-            pass
+            logger.warning("llm_universe_call_failed", exc_info=True)
 
     selected: list[str] = list(forced_symbols)
     dynamic_source = llm_decision.selected_symbols if llm_decision else llm_rank_base
@@ -1020,8 +1020,10 @@ async def _run_tick(
             portfolio_exposure = _compute_portfolio_exposure(positions, total_balance)
 
             quote = settings.quote_currency if hasattr(settings, "quote_currency") else "KRW"
+            available_cash = balances.balances.get(quote, Decimal("0"))
             balance_data: dict[str, object] = {
-                f"total_balance_{quote.lower()}": str(total_balance),
+                f"total_portfolio_value_{quote.lower()}": str(total_balance),
+                f"available_cash_{quote.lower()}": str(available_cash),
                 "position_count": len(positions),
             }
 
@@ -1164,24 +1166,26 @@ async def _run_tick(
                 )
 
         elif pnl_pct >= risk_limits.take_profit_pct:
-            if advice is not None and advice.action == "HOLD":
+            # 익절 구간: LLM 판단에 위임. SELL_CONSIDER만 매도, 그 외는 유지.
+            # 트레일링 스탑이 하락 반전을 잡아주므로 LLM이 상승 지속 여부를 판단.
+            if advice is not None and advice.action == llm_exit_action:
+                close_reason = (
+                    f"take_profit (LLM sell): pnl={pnl_pct:.2f}% >= {risk_limits.take_profit_pct}%, "
+                    f"LLM={advice.action}({advice.confidence})"
+                )
+            else:
                 log_event(
                     "decision",
                     {
                         "symbol": symbol,
                         "final_action": "HOLD",
-                        "trigger": "take_profit_held_by_llm",
+                        "trigger": "take_profit_held",
                         "position_side": pos.side.value,
                         "pnl_pct": str(pnl_pct),
-                        "llm_action": advice.action,
-                        "llm_reasoning": advice.reasoning,
+                        "llm_action": advice.action if advice else "none",
+                        "llm_reasoning": advice.reasoning if advice else "no LLM",
                         "price": str(trade_price),
                     },
-                )
-            else:
-                close_reason = (
-                    f"take_profit (LLM ok): pnl={pnl_pct:.2f}% >= {risk_limits.take_profit_pct}%, "
-                    f"LLM={advice.action if advice else 'none'}"
                 )
 
         elif risk_limits.trailing_stop_enabled:

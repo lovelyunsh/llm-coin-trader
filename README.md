@@ -4,11 +4,11 @@ LLM이 주도하는 암호화폐 자동거래 시스템입니다. 모의투자�
 
 ## 주요 특징
 
-- **LLM 주도 의사결정**: LLM(gpt-5.2, ChatGPT Codex OAuth)이 매매를 직접 결정. BUY_CONSIDER = 매수, SELL_CONSIDER = 매도
+- **LLM 주도 의사결정**: LLM(ChatGPT Codex OAuth, 모델 설정 가능)이 매매를 직접 결정. BUY_CONSIDER = 매수, SELL_CONSIDER = 매도. 시장가/지정가 주문 타입도 LLM이 결정
 - **동적 심볼 유니버스**: 1시간마다 KRW 마켓 후보를 필터링하고 LLM이 최종 거래 심볼을 선발
 - **전략 시그널은 참고 데이터**: EMA, RSI, ATR 시그널은 LLM에 전달되는 참고 정보일 뿐, 단독으로 주문을 내지 않음
 - **BTC 일봉 EMA200 필터**: BTC 일봉 기준 200일 EMA로 시장 레짐 판단, 알트 매매 시 LLM에 전달
-- **포지션 보호**: 하드 손절(-10% 자동 시장가 매도), 소프트 손절(-5%~-10% LLM 판단), 익절(+10%+ LLM 판단), 트레일링 스탑
+- **포지션 보호**: 하드 손절(-10% 자동 시장가 매도), 소프트 손절(-5%~-10% LLM 판단), 익절(+10%+ LLM 완전 위임), 트레일링 스탑
 - **안전 최우선**: Kill Switch, 이상징후 감지, 서킷브레이커
 - **웹 대시보드**: 포트 8932, 마스터 코드 인증(브루트포스 방어, CSRF 보호), 수동 매수/매도, AI 판단 로그, AI 심볼 판단 로그, 프롬프트 확인
 - **멀티 거래소**: 업비트(KRW 현물) + 바이낸스(USDT-M 선물) 지원
@@ -81,7 +81,7 @@ LLM은 자문이 아니라 **주도적 의사결정자**입니다.
     → 포지션 보호 (보호 매도 발생 시 이후 combined 판단 스킵):
         - 하드 손절(-10%): 시장가 매도, LLM 우회
         - 소프트 손절(-5%~-10%): LLM 판단
-        - 익절(+10%+): LLM 판단 (HOLD만 유지, 나머지 매도)
+        - 익절(+10%+): LLM 완전 위임 (SELL_CONSIDER만 매도, 나머지 유지. 트레일링 스탑이 안전망)
         - 트레일링 스탑: 자동
     → _resolve_action:
         - LLM 활성화 + advice 있음: LLM 따름
@@ -117,6 +117,10 @@ LLM은 자문이 아니라 **주도적 의사결정자**입니다.
 - `confidence`: 최소 0.65 (65%) 이상이어야 실행
 - `reasoning`: 한국어
 - `risk_notes`: 한국어
+- `buy_pct`: 총자산(KRW 현금 + 코인 평가액) 대비 매수 비율 (0-30%)
+- `sell_pct`: 보유 수량 대비 매도 비율 (0-100%)
+- `order_type`: "market" (시장가) 또는 "limit" (지정가, 기본값). LLM이 주문 타입 결정
+- `target_price`: 지정가 주문 시 희망 가격
 
 SHORT_CONSIDER/COVER_CONSIDER는 선물 모드(`FUTURES_ENABLED=true`)에서만 활성화
 
@@ -132,7 +136,7 @@ SHORT_CONSIDER/COVER_CONSIDER는 선물 모드(`FUTURES_ENABLED=true`)에서만 
 |------|------|
 | 손실 -10% 이상 (하드 손절) | 시장가 자동 매도, LLM 우회 |
 | 손실 -5%~-10% (소프트 손절) | LLM 판단 (SELL_CONSIDER = 매도, HOLD = 유지) |
-| 수익 +10% 이상 (익절) | LLM 판단 (명시적 HOLD만 유지, 나머지 매도) |
+| 수익 +10% 이상 (익절) | LLM 완전 위임 (SELL_CONSIDER만 매도, 나머지 유지. 트레일링 스탑 안전망) |
 | 트레일링 스탑 | 최고점 대비 trailing_stop_pct 하락 시 자동 매도 |
 | 숏 손실 -10% 이상 (하드 손절) | 시장가 자동 커버(BUY), LLM 우회 |
 | 숏 손실 -5%~-10% (소프트 손절) | LLM 판단 (COVER_CONSIDER = 커버, HOLD = 유지) |
@@ -346,7 +350,7 @@ WEB_MASTER_CODE=your-master-code-here
 # LLM 설정 (OAuth 방식)
 LLM_ENABLED=true
 LLM_AUTH_MODE=oauth
-LLM_OAUTH_MODEL=gpt-5.2
+LLM_OAUTH_MODEL=gpt-5.1-codex-mini
 
 # 로그 레벨
 LOG_LEVEL=INFO

@@ -162,15 +162,15 @@ OUTPUT: Valid JSON with these fields:
 - confidence: float 0.0-1.0 (see CONFIDENCE SCALE)
 - reasoning: Korean explanation (max 500 chars)
 - risk_notes: Korean risk concerns (max 300 chars)
-- buy_pct: percent of available KRW to use for BUY (0-10). Omit for system default.
+- buy_pct: percent of TOTAL PORTFOLIO VALUE (KRW cash + coin holdings combined) to use for BUY (0-30). Note: the system calculates order size as total_portfolio_value * buy_pct / 100, NOT available cash only. Check balance_info for both total_portfolio_value and available_cash to ensure you don't exceed available cash. Omit for system default.
 - sell_pct: percent of held quantity to sell (0-100). Omit for system default.
 - target_price: your desired LIMIT order price for BUY/SELL. Set strategically (e.g. near support for BUY, near resistance for SELL). Omit to use current market price.
 - order_type: "market" or "limit" (default: "limit"). Use "market" for immediate execution certainty, "limit" for better price.
 
 CONFIDENCE SCALE (strictly follow — minimum 0.65 required for execution):
-- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup. Full position (buy_pct 8-10).
-- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment. Standard position (buy_pct 5-7).
-- 0.65-0.69: Moderate-high conviction. 2-3 indicators confirmed. Acceptable entry with smaller position (buy_pct 3-5).
+- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup. Aggressive position (buy_pct 15-30).
+- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment. Standard position (buy_pct 8-15).
+- 0.65-0.69: Moderate-high conviction. 2-3 indicators confirmed. Acceptable entry with smaller position (buy_pct 3-8).
 - 0.5-0.64: Moderate conviction. Not enough confirmation. System will NOT execute — use HOLD instead.
 - Below 0.5: Low/no conviction. Always HOLD.
 IMPORTANT: Confidence below 0.65 will be rejected by the system. If you are not at least 65% confident, output HOLD instead of a low-confidence BUY_CONSIDER.
@@ -178,7 +178,7 @@ IMPORTANT: Confidence below 0.65 will be rejected by the system. If you are not 
 YOUR AUTHORITY:
 - BUY_CONSIDER = system will execute buy. SELL_CONSIDER = system will execute sell.
 - Positions at -5% to -10% loss: SELL_CONSIDER = sell, HOLD = keep holding (your call).
-- Positions at +10%+ profit: only explicit HOLD keeps the position; otherwise auto-sell.
+- Positions at +10%+ profit: YOU decide. SELL_CONSIDER = take profit, HOLD = let it ride. Trailing stop protects against reversal, so holding strong momentum is fine.
 - Hard stop-loss at -10% is automatic and bypasses you entirely.
 - Quality over quantity: 1 high-conviction trade beats 5 mediocre ones. Fees (0.05% each way) eat into small gains.
 
@@ -251,17 +251,17 @@ OUTPUT: Valid JSON with these fields:
 - confidence: float 0.0-1.0 (see CONFIDENCE SCALE)
 - reasoning: Korean explanation (max 500 chars)
 - risk_notes: Korean risk concerns (max 300 chars)
-- buy_pct: percent of available balance to use for long entry (0-10). Omit for system default.
+- buy_pct: percent of TOTAL PORTFOLIO VALUE (cash + position holdings combined) to use for long entry (0-30). Note: order size = total_portfolio_value * buy_pct / 100, NOT available cash only. Check balance_info for both total_portfolio_value and available_cash. Omit for system default.
 - sell_pct: percent of held long quantity to close (0-100). Omit for system default.
-- short_pct: percent of available balance to use for short entry (0-10). Omit for system default.
+- short_pct: percent of TOTAL PORTFOLIO VALUE to use for short entry (0-30). Same calculation as buy_pct. Omit for system default.
 - target_price: your desired LIMIT order price for entry/exit. Set strategically (e.g. near support for longs, near resistance for shorts). Omit to use current market price.
 - position_side: "long" or "short" indicating direction of intended trade. Omit if HOLD.
 - order_type: "market" or "limit" (default: "limit"). Use "market" for immediate execution certainty, "limit" for better price.
 
 CONFIDENCE SCALE (strictly follow — minimum 0.65 required for execution):
-- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup. Full position (buy_pct/short_pct 8-10).
-- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment. Standard position (buy_pct/short_pct 5-7).
-- 0.65-0.69: Moderate-high conviction. 2-3 indicators confirmed. Acceptable entry with smaller position (buy_pct/short_pct 3-5).
+- 0.9-1.0: Very high conviction. 4+ indicators aligned. Near-certain setup. Aggressive position (buy_pct/short_pct 15-30).
+- 0.7-0.8: High conviction. 3 indicators confirmed. Clear trend/momentum alignment. Standard position (buy_pct/short_pct 8-15).
+- 0.65-0.69: Moderate-high conviction. 2-3 indicators confirmed. Acceptable entry with smaller position (buy_pct/short_pct 3-8).
 - 0.5-0.64: Moderate conviction. Not enough confirmation. System will NOT execute — use HOLD instead.
 - Below 0.5: Low/no conviction. Always HOLD.
 IMPORTANT: Confidence below 0.65 will be rejected by the system. If you are not at least 65% confident, output HOLD instead of a low-confidence trade.
@@ -270,7 +270,7 @@ YOUR AUTHORITY:
 - BUY_CONSIDER = open or add long position. SELL_CONSIDER = close or reduce long position.
 - SHORT_CONSIDER = open short position. COVER_CONSIDER = close short position.
 - Positions at -5% to -10% loss: SELL_CONSIDER (long) or COVER_CONSIDER (short) = close, HOLD = keep holding (your call).
-- Positions at +10%+ profit: only explicit HOLD keeps the position; otherwise auto-close.
+- Positions at +10%+ profit: YOU decide. SELL_CONSIDER/COVER_CONSIDER = take profit, HOLD = let it ride. Trailing stop protects against reversal.
 - Hard stop-loss at -10% is automatic and bypasses you entirely.
 - Liquidation risk: if mark price approaches liquidation price, always recommend closing.
 - Quality over quantity: 1 high-conviction trade beats 5 mediocre ones. Fees eat into small gains.
