@@ -161,7 +161,7 @@ INPUT DATA:
 - Volume: volume_vs_avg_ratio, volume_trend
 - Portfolio exposure, risk context, positions, balance, recent orders/candles
 - Current KST time (Korean Standard Time)
-- NOTE: The last candle in Recent Candles is synthetic (built from current ticker price). Its volume is unreliable — do NOT use the last candle's volume for decisions. Use earlier candles for volume analysis.
+- NOTE: The last candle in Recent Candles is the current in-progress 1h candle (real-time data from exchange). Its volume is partial (accumulated so far this hour).
 
 OUTPUT: Valid JSON with these fields:
 - action: "HOLD" | "BUY_CONSIDER" | "SELL_CONSIDER"
@@ -218,10 +218,10 @@ GUIDELINES:
 - If previous decisions show a pattern of quick losses, increase entry threshold.
 
 TARGET PRICE RULES:
-- For BUY: Set target_price at or slightly below current price (e.g. near support, recent low, or bid price). Do NOT set too far below — the order will be cancelled if unfilled within 5 minutes.
-- For SELL: Set target_price at or slightly above current price (e.g. near resistance or ask price).
-- Keep target_price within ~1-2% of current price to ensure realistic fills within the 5-minute window.
-- IMPORTANT: All LIMIT orders that remain unfilled for 5 minutes are automatically cancelled. Price your orders to fill.
+- IMPORTANT: There is a ~5 second delay between your decision and actual order placement. Price moves during this gap. Be aggressive with pricing to ensure fills.
+- For BUY: Set target_price AT or ABOVE current price (e.g. +0.1~0.3%). Slightly overpaying guarantees the fill — missing a good entry is worse than paying a fraction more.
+- For SELL: Set target_price AT or BELOW current price (e.g. -0.1~0.3%). Slightly underpricing guarantees the exit.
+- All LIMIT orders unfilled within 5 minutes are automatically cancelled. Price to fill, not to optimize.
 - Omit target_price to use the current market price as default.
 
 ORDER TYPE RULES:
@@ -250,7 +250,7 @@ INPUT DATA:
 - Volume: volume_vs_avg_ratio, volume_trend
 - Portfolio exposure, risk context, positions, balance, recent orders/candles
 - Current KST time (Korean Standard Time)
-- NOTE: The last candle in Recent Candles is synthetic (built from current ticker price). Its volume is unreliable — do NOT use the last candle's volume for decisions. Use earlier candles for volume analysis.
+- NOTE: The last candle in Recent Candles is the current in-progress 1h candle (real-time data from exchange). Its volume is partial (accumulated so far this hour).
 
 OUTPUT: Valid JSON with these fields:
 - action: "HOLD" | "BUY_CONSIDER" | "SELL_CONSIDER" | "SHORT_CONSIDER" | "COVER_CONSIDER"
@@ -313,10 +313,10 @@ GUIDELINES:
 - If previous decisions show a pattern of quick losses, increase entry threshold.
 
 TARGET PRICE RULES:
-- For BUY/LONG: Set target_price at or slightly below current price (e.g. near support or bid). Do NOT set too far below — the order will be cancelled if unfilled within 5 minutes.
-- For SELL/SHORT: Set target_price at or slightly above current price (e.g. near resistance or ask).
-- Keep target_price within ~1-2% of current price to ensure realistic fills within the 5-minute window.
-- IMPORTANT: All LIMIT orders that remain unfilled for 5 minutes are automatically cancelled. Price your orders to fill.
+- IMPORTANT: There is a ~5 second delay between your decision and actual order placement. Price moves during this gap. Be aggressive with pricing to ensure fills.
+- For BUY/LONG: Set target_price AT or ABOVE current price (e.g. +0.1~0.3%). Slightly overpaying guarantees the fill — missing a good entry is worse than paying a fraction more.
+- For SELL/SHORT: Set target_price AT or BELOW current price (e.g. -0.1~0.3%). Slightly underpricing guarantees the exit.
+- All LIMIT orders unfilled within 5 minutes are automatically cancelled. Price to fill, not to optimize.
 - Omit target_price to use the current market price as default.
 
 ORDER TYPE RULES:

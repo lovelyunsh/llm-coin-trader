@@ -955,9 +955,8 @@ async def _run_tick(
                 if pos.symbol == symbol and pos.quantity > 0:
                     pos_with = pos.model_copy(update={"current_price": trade_price})
                     pnl = pos_with.unrealized_pnl_pct
-                    if pnl is not None and (
-                        pnl <= -abs(settings.risk.soft_stop_loss_pct)
-                        or pnl >= settings.risk.take_profit_pct
+                    if pnl is not None and pnl <= -abs(
+                        settings.risk.soft_stop_loss_pct
                     ):
                         _skip_llm = False
                     break
@@ -1167,29 +1166,6 @@ async def _run_tick(
                         "symbol": symbol,
                         "final_action": "HOLD",
                         "trigger": "soft_stop_loss_held",
-                        "position_side": pos.side.value,
-                        "pnl_pct": str(pnl_pct),
-                        "llm_action": advice.action if advice else "none",
-                        "llm_reasoning": advice.reasoning if advice else "no LLM",
-                        "price": str(trade_price),
-                    },
-                )
-
-        elif pnl_pct >= risk_limits.take_profit_pct:
-            # 익절 구간: LLM 판단에 위임. SELL_CONSIDER만 매도, 그 외는 유지.
-            # 트레일링 스탑이 하락 반전을 잡아주므로 LLM이 상승 지속 여부를 판단.
-            if advice is not None and advice.action == llm_exit_action:
-                close_reason = (
-                    f"take_profit (LLM sell): pnl={pnl_pct:.2f}% >= {risk_limits.take_profit_pct}%, "
-                    f"LLM={advice.action}({advice.confidence})"
-                )
-            else:
-                log_event(
-                    "decision",
-                    {
-                        "symbol": symbol,
-                        "final_action": "HOLD",
-                        "trigger": "take_profit_held",
                         "position_side": pos.side.value,
                         "pnl_pct": str(pnl_pct),
                         "llm_action": advice.action if advice else "none",
@@ -1421,6 +1397,11 @@ async def _run_tick(
                     sell_qty = pos.quantity * sell_pct / Decimal("100")
                 if sell_qty <= 0:
                     continue
+                # 잔여분이 5000원 미만이면 전량 매도 (업비트 최소 주문금액 미충족 방지)
+                remaining_qty = pos.quantity - sell_qty
+                remaining_value = remaining_qty * trade_price
+                if remaining_value < _MIN_ORDER_VALUE_KRW:
+                    sell_qty = pos.quantity
 
                 order_price = trade_price
                 if advice is not None and advice.target_price is not None:
