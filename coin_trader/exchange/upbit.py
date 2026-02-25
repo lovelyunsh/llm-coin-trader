@@ -2,17 +2,38 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
+import re
 import uuid
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Protocol, TypeAlias, cast
 from urllib.parse import unquote, urlencode
 
+import httpx
 import jwt  # PyJWT
 from typing_extensions import override
 
 from coin_trader.exchange.base import BaseExchangeAdapter
+
+_log = logging.getLogger(__name__)
+
+# Maps URL path prefixes to Upbit rate-limit groups.
+# market group: 10 req/sec (public market data)
+# order/trade groups: separate quotas but less frequently hit
+_URL_GROUP: list[tuple[str, str]] = [
+    ("/candles/", "market"),
+    ("/ticker", "market"),
+    ("/orderbook", "market"),
+    ("/market/", "market"),
+    ("/trades/", "market"),
+    ("/orders/open", "order"),   # must come before /orders
+    ("/orders", "trade"),        # POST/DELETE order placement
+    ("/order", "order"),         # GET single order by uuid
+    ("/accounts", "default"),
+]
 
 
 class _JwtEncode(Protocol):
@@ -113,11 +134,43 @@ class UpbitAdapter(BaseExchangeAdapter):
     _secret_key: str
 
     def __init__(
-        self, access_key: str, secret_key: str, rate_limit_delay: float = 0.2
+        self, access_key: str, secret_key: str, rate_limit_delay: float = 0.12
     ) -> None:
         super().__init__(base_url=self.UPBIT_API_URL, rate_limit_delay=rate_limit_delay)
         self._access_key = access_key
         self._secret_key = secret_key
+        # group -> (sec_remaining, monotonic_time_when_read)
+        self._group_remaining: dict[str, tuple[int, float]] = {}
+
+    def _url_to_group(self, url: str) -> str:
+        for prefix, group in _URL_GROUP:
+            if url.startswith(prefix):
+                return group
+        return "default"
+
+    @override
+    def _post_response_hook(self, url: str, headers: httpx.Headers) -> None:
+        raw = headers.get("Remaining-Req", "")
+        if not raw:
+            return
+        g = re.search(r"group=(\w+)", raw)
+        s = re.search(r"sec=(\d+)", raw)
+        if g and s:
+            self._group_remaining[g.group(1)] = (int(s.group(1)), asyncio.get_running_loop().time())
+
+    @override
+    async def _pre_request_hook(self, url: str) -> None:
+        group = self._url_to_group(url)
+        state = self._group_remaining.get(group)
+        if state is None:
+            return
+        remaining_sec, read_at = state
+        if remaining_sec <= 1:
+            elapsed = asyncio.get_running_loop().time() - read_at
+            wait = 1.0 - elapsed
+            if wait > 0.01:
+                _log.warning("upbit_rate_throttle group=%s sec_remaining=%d wait=%.3fs", group, remaining_sec, wait)
+                await asyncio.sleep(wait)
 
     def _create_token(self, query_params: QueryParams | None = None) -> str:
         payload: dict[str, str] = {

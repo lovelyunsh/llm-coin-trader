@@ -1060,6 +1060,11 @@
             return n.toLocaleString('ko-KR', {maximumFractionDigits: 8});
         }
 
+        function formatKRW(num) {
+            if (num === null || num === undefined) return '0';
+            return Math.round(Number(num)).toLocaleString('ko-KR');
+        }
+
         function formatDecimal(num, decimals = 2) {
             if (num === null || num === undefined) return '0.00';
             return Number(num).toFixed(decimals);
@@ -1217,9 +1222,10 @@
                 for (const [currency, amount] of Object.entries(data.balances)) {
                     const item = document.createElement('div');
                     item.className = 'balance-item';
+                    const displayAmount = currency === 'KRW' ? formatKRW(amount) : formatDecimal(amount, 8);
                     item.innerHTML = `
                         <span class="balance-currency">${currency}</span>
-                        <span class="balance-amount">${formatDecimal(amount, 8)}</span>
+                        <span class="balance-amount">${displayAmount}</span>
                     `;
                     grid.appendChild(item);
                 }
@@ -1248,8 +1254,8 @@
                             <td>${formatDecimal(pos.quantity, 8)}</td>
                             <td>${formatNumber(pos.average_entry_price)}</td>
                             <td>${formatNumber(pos.current_price)}</td>
-                            <td>${formatNumber(pos.quantity * pos.current_price)}</td>
-                            <td class="${pnlClass}">${pnlSign}${formatNumber(pos.unrealized_pnl)}</td>
+                            <td>${formatKRW(pos.quantity * pos.current_price)}</td>
+                            <td class="${pnlClass}">${pnlSign}${formatKRW(pos.unrealized_pnl)}</td>
                             <td class="${pnlClass}">${pnlSign}${formatPercent(pos.unrealized_pnl_pct)}</td>
                             <td><button class="btn-sell" onclick="sellPosition('${pos.symbol}')">전량 매도</button></td>
                         </tr>
@@ -1264,16 +1270,16 @@
             try {
                 const data = await fetchAPI('/api/pnl');
                 
-                document.getElementById('totalValue').textContent = formatNumber(data.total_value_krw);
-                
+                document.getElementById('totalValue').textContent = formatKRW(data.total_value_krw);
+
                 const pnlValue = document.getElementById('totalPnl');
                 const pnlPctValue = document.getElementById('totalPnlPct');
                 const initialEl = document.getElementById('initialBalance');
-                
+
                 if (data.is_paper) {
-                    pnlValue.textContent = formatNumber(data.total_pnl_krw);
+                    pnlValue.textContent = formatKRW(data.total_pnl_krw);
                     pnlPctValue.textContent = formatPercent(data.total_pnl_pct);
-                    initialEl.textContent = formatNumber(data.initial_balance_krw);
+                    initialEl.textContent = formatKRW(data.initial_balance_krw);
 
                     if (data.total_pnl_krw >= 0) {
                         pnlValue.classList.remove('negative');
@@ -1287,9 +1293,9 @@
                         pnlPctValue.classList.add('negative');
                     }
                 } else {
-                    pnlValue.textContent = formatNumber(data.total_pnl_krw);
+                    pnlValue.textContent = formatKRW(data.total_pnl_krw);
                     pnlPctValue.textContent = formatPercent(data.total_pnl_pct);
-                    initialEl.textContent = formatNumber(data.initial_balance_krw);
+                    initialEl.textContent = formatKRW(data.initial_balance_krw);
 
                     if (data.total_pnl_krw >= 0) {
                         pnlValue.classList.remove('negative');
