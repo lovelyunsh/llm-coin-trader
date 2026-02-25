@@ -133,7 +133,9 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         timeout: float = 30.0,
     ) -> None:
         base_url = BINANCE_FUTURES_TESTNET_URL if testnet else BINANCE_FUTURES_PROD_URL
-        super().__init__(base_url=base_url, rate_limit_delay=rate_limit_delay, timeout=timeout)
+        super().__init__(
+            base_url=base_url, rate_limit_delay=rate_limit_delay, timeout=timeout
+        )
         self._api_key = api_key
         self._api_secret = api_secret
         self._testnet = testnet
@@ -284,7 +286,11 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
             contract_type = info.get("contractType")
             quote_asset = info.get("quoteAsset")
             status = info.get("status")
-            if contract_type == "PERPETUAL" and quote_asset == "USDT" and status == "TRADING":
+            if (
+                contract_type == "PERPETUAL"
+                and quote_asset == "USDT"
+                and status == "TRADING"
+            ):
                 binance_sym = info.get("symbol")
                 if isinstance(binance_sym, str):
                     markets.append(self.normalize_symbol(binance_sym))

@@ -36,7 +36,9 @@ class ISignalToIntent(ABC):
 
 class IRiskManager(ABC):
     @abstractmethod
-    async def validate(self, intent: OrderIntent, state: dict[str, object]) -> RiskDecisionRecord:
+    async def validate(
+        self, intent: OrderIntent, state: dict[str, object]
+    ) -> RiskDecisionRecord:
         raise NotImplementedError
 
 
@@ -83,7 +85,9 @@ class IExchangeAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_open_orders(self, symbol: str | None = None) -> list[dict[str, object]]:
+    async def get_open_orders(
+        self, symbol: str | None = None
+    ) -> list[dict[str, object]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -103,7 +107,9 @@ class IExchangeAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_candles(self, symbol: str, interval: str, count: int) -> list[dict[str, object]]:
+    async def get_candles(
+        self, symbol: str, interval: str, count: int
+    ) -> list[dict[str, object]]:
         raise NotImplementedError
 
     @abstractmethod

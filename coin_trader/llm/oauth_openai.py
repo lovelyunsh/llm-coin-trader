@@ -4,6 +4,7 @@ import base64
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
@@ -18,7 +19,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-
 CLIENT_ID: Final[str] = "app_EMoamEEZ73f0CkXaXp7hrann"
 ISSUER: Final[str] = "https://auth.openai.com"
 AUTHORIZE_URL: Final[str] = f"{ISSUER}/oauth/authorize"
@@ -29,6 +29,8 @@ SCOPE: Final[str] = "openid profile email offline_access"
 ORIGINATOR: Final[str] = "opencode"
 
 DEFAULT_AUTH_FILE: Final[Path] = Path("data/.auth/openai-oauth.json")
+
+logger = logging.getLogger("llm.oauth_openai")
 
 ALLOWED_MODELS: Final[set[str]] = {
     "gpt-5.2",
@@ -172,7 +174,9 @@ def _get_int(data: dict[str, object], key: str, default: int) -> int:
     return default
 
 
-def exchange_authorization_code(code: str, verifier: str, redirect_uri: str) -> AuthTokens:
+def exchange_authorization_code(
+    code: str, verifier: str, redirect_uri: str
+) -> AuthTokens:
     data = _token_request(
         {
             "grant_type": "authorization_code",
@@ -301,7 +305,9 @@ def save_auth(auth: AuthTokens, auth_file: Path = DEFAULT_AUTH_FILE) -> None:
             "id_token": auth_to_write.id_token,
         }
     }
-    _ = auth_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    _ = auth_file.write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
     os.chmod(auth_file, 0o600)
 
 
@@ -412,7 +418,9 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.__class__.done_event.set()
 
 
-def login_with_browser_oauth(*, open_browser: bool = True, auth_file: Path = DEFAULT_AUTH_FILE) -> AuthTokens:
+def login_with_browser_oauth(
+    *, open_browser: bool = True, auth_file: Path = DEFAULT_AUTH_FILE
+) -> AuthTokens:
     verifier, challenge = generate_pkce()
     state = generate_state()
     redirect_uri = f"http://localhost:{REDIRECT_PORT}{REDIRECT_PATH}"
@@ -440,7 +448,9 @@ def login_with_browser_oauth(*, open_browser: bool = True, auth_file: Path = DEF
         if not _CallbackHandler.result_code:
             raise RuntimeError("OAuth code missing")
 
-        tokens = exchange_authorization_code(_CallbackHandler.result_code, verifier, redirect_uri)
+        tokens = exchange_authorization_code(
+            _CallbackHandler.result_code, verifier, redirect_uri
+        )
         tokens = dataclasses.replace(tokens, account_id=extract_account_id(tokens))
         save_auth(tokens, auth_file=auth_file)
         return tokens
@@ -458,15 +468,23 @@ def get_reusable_auth(
         saved = load_saved_auth(auth_file=auth_file)
         if saved:
             if saved.access and saved.expires > _now_ms():
+                logger.info("oauth_reuse_hit auth_file=%s", auth_file)
                 return saved
+            logger.info("oauth_reuse_expired_refresh_start auth_file=%s", auth_file)
             refreshed = refresh_access_token(saved.refresh)
             account_id = saved.account_id or extract_account_id(refreshed)
             refreshed = dataclasses.replace(refreshed, account_id=account_id)
             save_auth(refreshed, auth_file=auth_file)
+            logger.info("oauth_reuse_refresh_success auth_file=%s", auth_file)
             return refreshed
+        logger.warning("oauth_reuse_missing_saved_auth auth_file=%s", auth_file)
 
     if not open_browser:
+        logger.error("oauth_retry_unavailable_no_browser auth_file=%s", auth_file)
         raise RuntimeError("No saved OAuth session. Login is required.")
+    logger.info(
+        "oauth_retry_login_start auth_file=%s force_login=%s", auth_file, force_login
+    )
     return login_with_browser_oauth(open_browser=True, auth_file=auth_file)
 
 

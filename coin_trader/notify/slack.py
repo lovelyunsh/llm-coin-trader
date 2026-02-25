@@ -27,7 +27,9 @@ class SlackNotifier:
         self._url = webhook_url
         self._timeout = 10.0
 
-    async def send_alert(self, title: str, message: str, severity: str = "medium") -> None:
+    async def send_alert(
+        self, title: str, message: str, severity: str = "medium"
+    ) -> None:
         if not self._url:
             logger.debug("slack_skip reason=no_webhook_url")
             return
@@ -55,7 +57,9 @@ class SlackNotifier:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        resp = cast(http.client.HTTPResponse, urllib.request.urlopen(req, timeout=self._timeout))
+        resp = cast(
+            http.client.HTTPResponse, urllib.request.urlopen(req, timeout=self._timeout)
+        )
         with resp:
             status = getattr(resp, "status", 0)
             return int(status or 0)

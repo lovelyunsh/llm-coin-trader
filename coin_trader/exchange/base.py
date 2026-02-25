@@ -8,8 +8,12 @@ from types import TracebackType
 from typing import Self, TypeAlias, cast
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 _API_METRICS: dict[str, object] = {
     "total_requests": 0,
@@ -56,7 +60,9 @@ class BaseExchangeAdapter:
     _rate_limit_lock: asyncio.Lock
     _last_request_time: float
 
-    def __init__(self, base_url: str, rate_limit_delay: float = 0.15, timeout: float = 30.0) -> None:
+    def __init__(
+        self, base_url: str, rate_limit_delay: float = 0.15, timeout: float = 30.0
+    ) -> None:
         self.base_url = base_url
         self.rate_limit_delay = rate_limit_delay
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
@@ -111,7 +117,9 @@ class BaseExchangeAdapter:
                     response.raise_for_status()
                     return cast(BaseExchangeAdapter.Json, response.json())
 
-                _API_METRICS["total_429"] = _to_int(_API_METRICS.get("total_429", 0), 0) + 1
+                _API_METRICS["total_429"] = (
+                    _to_int(_API_METRICS.get("total_429", 0), 0) + 1
+                )
                 _API_METRICS["last_429_ts"] = asyncio.get_running_loop().time()
 
                 retry_after = response.headers.get("Retry-After")

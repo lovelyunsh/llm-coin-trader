@@ -33,14 +33,13 @@ from coin_trader.core.models import (
 
 _logger = logging.getLogger("broker.paper_futures")
 
-_FEE_RATE = Decimal("0.0004")          # 0.04% taker
-_SLIPPAGE_RATE = Decimal("0.001")      # 0.1% market slippage
+_FEE_RATE = Decimal("0.0004")  # 0.04% taker
+_SLIPPAGE_RATE = Decimal("0.001")  # 0.1% market slippage
 _MAINTENANCE_MARGIN_RATE = Decimal("0.004")  # 0.4%
 
 
 class _TickerAdapter(Protocol):
-    async def get_ticker(self, symbol: str) -> Mapping[str, object]:
-        ...
+    async def get_ticker(self, symbol: str) -> Mapping[str, object]: ...
 
 
 @dataclass
@@ -68,9 +67,13 @@ def _calc_liquidation_price(
 ) -> Decimal:
     lev = Decimal(str(leverage))
     if side == PositionSide.LONG:
-        return entry_price * (Decimal("1") - Decimal("1") / lev + _MAINTENANCE_MARGIN_RATE)
+        return entry_price * (
+            Decimal("1") - Decimal("1") / lev + _MAINTENANCE_MARGIN_RATE
+        )
     else:
-        return entry_price * (Decimal("1") + Decimal("1") / lev - _MAINTENANCE_MARGIN_RATE)
+        return entry_price * (
+            Decimal("1") + Decimal("1") / lev - _MAINTENANCE_MARGIN_RATE
+        )
 
 
 class PaperFuturesBroker:
@@ -142,7 +145,9 @@ class PaperFuturesBroker:
         else:
             # Average into existing position
             total_qty = existing.quantity + quantity
-            avg_entry = (existing.entry_price * existing.quantity + price * quantity) / total_qty
+            avg_entry = (
+                existing.entry_price * existing.quantity + price * quantity
+            ) / total_qty
             new_margin = existing.margin + margin
             new_liq = _calc_liquidation_price(avg_entry, leverage, side)
             self._positions[key] = _FuturesPosition(
@@ -221,7 +226,9 @@ class PaperFuturesBroker:
 
         quantity = intent.quantity
         if quantity is None and intent.quote_quantity is not None:
-            ref_price = intent.price if intent.price and intent.price > 0 else current_price
+            ref_price = (
+                intent.price if intent.price and intent.price > 0 else current_price
+            )
             if ref_price <= 0:
                 raise ValueError("Invalid reference price for sizing")
             quantity = intent.quote_quantity / ref_price
@@ -238,20 +245,32 @@ class PaperFuturesBroker:
         elif intent.order_type == OrderType.LIMIT:
             if intent.price is None or intent.price <= 0:
                 order = self._make_order(
-                    client_order_id, intent, quantity, intent.price, now,
+                    client_order_id,
+                    intent,
+                    quantity,
+                    intent.price,
+                    now,
                     status=OrderStatus.REJECTED,
                     metadata={"error": "invalid_limit_price"},
                 )
                 return order
             fill_price = intent.price
         elif intent.order_type == OrderType.STOP_MARKET:
-            fill_price = intent.stop_price if intent.stop_price and intent.stop_price > 0 else current_price
+            fill_price = (
+                intent.stop_price
+                if intent.stop_price and intent.stop_price > 0
+                else current_price
+            )
         else:
             fill_price = current_price
 
         if fill_price <= 0:
             order = self._make_order(
-                client_order_id, intent, quantity, intent.price, now,
+                client_order_id,
+                intent,
+                quantity,
+                intent.price,
+                now,
                 status=OrderStatus.REJECTED,
                 metadata={"error": "zero_fill_price"},
             )
@@ -263,21 +282,33 @@ class PaperFuturesBroker:
         fee = quantity * fill_price * _FEE_RATE
 
         if is_close:
-            realized_pnl = self._close_position(intent.symbol, pos_side, quantity, fill_price)
+            realized_pnl = self._close_position(
+                intent.symbol, pos_side, quantity, fill_price
+            )
             proceeds = quantity * fill_price - fee + realized_pnl
             self._balance_usdt += proceeds
             _logger.debug(
                 "close_position symbol=%s side=%s qty=%s pnl=%s",
-                intent.symbol, pos_side.value, quantity, realized_pnl,
+                intent.symbol,
+                pos_side.value,
+                quantity,
+                realized_pnl,
             )
         else:
             required_margin = (quantity * fill_price) / Decimal(str(leverage))
             total_cost = required_margin + fee
             if self._balance_usdt < total_cost:
                 order = self._make_order(
-                    client_order_id, intent, quantity, fill_price, now,
+                    client_order_id,
+                    intent,
+                    quantity,
+                    fill_price,
+                    now,
                     status=OrderStatus.REJECTED,
-                    metadata={"error": "insufficient_margin", "required": str(total_cost)},
+                    metadata={
+                        "error": "insufficient_margin",
+                        "required": str(total_cost),
+                    },
                 )
                 return order
 
@@ -285,11 +316,19 @@ class PaperFuturesBroker:
             self._open_position(intent.symbol, pos_side, quantity, fill_price, leverage)
             _logger.debug(
                 "open_position symbol=%s side=%s qty=%s price=%s margin=%s",
-                intent.symbol, pos_side.value, quantity, fill_price, required_margin,
+                intent.symbol,
+                pos_side.value,
+                quantity,
+                fill_price,
+                required_margin,
             )
 
         order = self._make_order(
-            client_order_id, intent, quantity, fill_price, now,
+            client_order_id,
+            intent,
+            quantity,
+            fill_price,
+            now,
             status=OrderStatus.FILLED,
             filled_quantity=quantity,
             avg_fill_price=fill_price,
@@ -394,7 +433,9 @@ class PaperFuturesBroker:
                     symbol=pos.symbol,
                     quantity=pos.quantity,
                     average_entry_price=pos.entry_price,
-                    current_price=current_price if current_price and current_price > 0 else None,
+                    current_price=(
+                        current_price if current_price and current_price > 0 else None
+                    ),
                     timestamp=now,
                     side=pos.side,
                     leverage=pos.leverage,

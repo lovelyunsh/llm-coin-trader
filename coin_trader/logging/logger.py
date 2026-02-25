@@ -68,7 +68,17 @@ _EVENT_ICONS: dict[str, str] = {
 }
 
 _SKIP_CONSOLE_KEYS = frozenset(
-    {"event", "level", "ts", "timestamp", "run_id", "mode", "exchange", "logger", "exc_info"}
+    {
+        "event",
+        "level",
+        "ts",
+        "timestamp",
+        "run_id",
+        "mode",
+        "exchange",
+        "logger",
+        "exc_info",
+    }
 )
 
 
@@ -90,7 +100,9 @@ def _pretty_console(event: str, level: str, kv: dict[str, Any]) -> str:
     event_str = f"{_BOLD}{event}{_RESET}"
 
     detail_parts = [
-        _format_kv(k, v) for k, v in kv.items() if k not in _SKIP_CONSOLE_KEYS and v is not None
+        _format_kv(k, v)
+        for k, v in kv.items()
+        if k not in _SKIP_CONSOLE_KEYS and v is not None
     ]
     details = f"  {' '.join(detail_parts)}" if detail_parts else ""
 
@@ -105,7 +117,9 @@ def set_trading_mode(mode: str) -> None:
     _current_mode = mode
 
 
-def add_common_fields(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+def add_common_fields(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
     event_dict.setdefault("run_id", os.getenv("RUN_ID", "unknown"))
     event_dict.setdefault("mode", _current_mode)
     event_dict.setdefault("exchange", os.getenv("EXCHANGE", "upbit"))
@@ -174,12 +188,19 @@ class EventFileWriter:
 
         kept: list[dict[str, Any]] = []
         for group in groups:
-            if len(group) <= 1 or str(group[0].get("final_action", "")).upper() != "HOLD":
+            if (
+                len(group) <= 1
+                or str(group[0].get("final_action", "")).upper() != "HOLD"
+            ):
                 kept.extend(group)
                 continue
             try:
-                t_first = _dt.fromisoformat(str(group[0].get("ts", "")).replace("Z", "+00:00"))
-                t_last = _dt.fromisoformat(str(group[-1].get("ts", "")).replace("Z", "+00:00"))
+                t_first = _dt.fromisoformat(
+                    str(group[0].get("ts", "")).replace("Z", "+00:00")
+                )
+                t_last = _dt.fromisoformat(
+                    str(group[-1].get("ts", "")).replace("Z", "+00:00")
+                )
                 span = (t_last - t_first).total_seconds()
             except (ValueError, TypeError):
                 kept.extend(group)
@@ -210,7 +231,9 @@ _fallback_level = _LEVEL_MAP["INFO"]
 
 
 class _FallbackLogger:
-    def __init__(self, name: str | None = None, context: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, name: str | None = None, context: dict[str, Any] | None = None
+    ) -> None:
         self._name = name or "coin_trader"
         self._context = dict(context or {})
 
@@ -317,5 +340,7 @@ def log_event(event_type: str, data: dict[str, Any]) -> None:
     payload.setdefault("run_id", os.getenv("RUN_ID", "unknown"))
     payload.setdefault("mode", _current_mode)
     payload.setdefault("exchange", os.getenv("EXCHANGE", "upbit"))
-    payload.setdefault("ts", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    payload.setdefault(
+        "ts", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     _file_writer.write_event(event_type, redact_dict(payload))

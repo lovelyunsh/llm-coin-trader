@@ -131,7 +131,9 @@ def redact_value(value: Any) -> Any:
     return value
 
 
-def redact_sensitive_data(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
+def redact_sensitive_data(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
     """structlog processor that redacts sensitive data from all event dict values"""
 
     return {k: redact_value(v) for k, v in event_dict.items()}

@@ -37,38 +37,29 @@ class _ExchangeAdapter(Protocol):
         order_type: str,
         quantity: Decimal,
         price: Decimal | None,
-    ) -> Mapping[str, object]:
-        ...
+    ) -> Mapping[str, object]: ...
 
-    async def cancel_order(self, order_id: str, symbol: str) -> object:
-        ...
+    async def cancel_order(self, order_id: str, symbol: str) -> object: ...
 
-    async def get_open_orders(self) -> object:
-        ...
+    async def get_open_orders(self) -> object: ...
 
-    async def get_order(self, order_id: str) -> Mapping[str, object]:
-        ...
+    async def get_order(self, order_id: str) -> Mapping[str, object]: ...
 
-    async def get_balances(self) -> object:
-        ...
+    async def get_balances(self) -> object: ...
 
-    async def get_accounts_raw(self) -> list[Mapping[str, object]]:
-        ...
+    async def get_accounts_raw(self) -> list[Mapping[str, object]]: ...
 
-    async def get_ticker(self, symbol: str) -> Mapping[str, object]:
-        ...
+    async def get_ticker(self, symbol: str) -> Mapping[str, object]: ...
 
-    async def get_tickers(self, symbols: list[str]) -> Mapping[str, Mapping[str, object]]:
-        ...
+    async def get_tickers(
+        self, symbols: list[str]
+    ) -> Mapping[str, Mapping[str, object]]: ...
 
-    async def get_deposits(self, limit: int = ...) -> list[Mapping[str, object]]:
-        ...
+    async def get_deposits(self, limit: int = ...) -> list[Mapping[str, object]]: ...
 
-    async def get_withdraws(self, limit: int = ...) -> list[Mapping[str, object]]:
-        ...
+    async def get_withdraws(self, limit: int = ...) -> list[Mapping[str, object]]: ...
 
-    def normalize_symbol(self, symbol: str) -> str:
-        ...
+    def normalize_symbol(self, symbol: str) -> str: ...
 
 
 class LiveBroker:
@@ -93,7 +84,11 @@ class LiveBroker:
         self._accounts_cache: list[Mapping[str, object]] = []
         self._accounts_cache_ts: float = 0.0
         self._ticker_cache: dict[str, tuple[float, Mapping[str, object]]] = {}
-        self._snapshot_cache: tuple[float, BalanceSnapshot | None, list[Position]] = (0.0, None, [])
+        self._snapshot_cache: tuple[float, BalanceSnapshot | None, list[Position]] = (
+            0.0,
+            None,
+            [],
+        )
         self._net_deposits_cache: dict[str, tuple[float, Decimal]] = {}
 
     async def place(self, intent: OrderIntent, client_order_id: str) -> Order:
@@ -122,7 +117,9 @@ class LiveBroker:
             )
 
             order_id = result.get("uuid", result.get("orderId", result.get("id", "")))
-            status_str = str(result.get("state", result.get("status", "submitted"))).lower()
+            status_str = str(
+                result.get("state", result.get("status", "submitted"))
+            ).lower()
             status_map = {
                 "wait": OrderStatus.SUBMITTED,
                 "watch": OrderStatus.SUBMITTED,
@@ -138,10 +135,14 @@ class LiveBroker:
             }
             status = status_map.get(status_str, OrderStatus.SUBMITTED)
 
-            executed = Decimal(str(result.get("executed_volume", result.get("filled", "0"))))
+            executed = Decimal(
+                str(result.get("executed_volume", result.get("filled", "0")))
+            )
             remaining_obj = result.get("remaining_volume", result.get("remaining"))
             remaining = (
-                Decimal(str(remaining_obj)) if remaining_obj is not None else (quantity - executed)
+                Decimal(str(remaining_obj))
+                if remaining_obj is not None
+                else (quantity - executed)
             )
             if remaining < 0:
                 remaining = Decimal("0")
@@ -218,7 +219,9 @@ class LiveBroker:
             if order_type == OrderType.LIMIT and price is None:
                 continue
 
-            executed = Decimal(str(raw.get("executed_volume", raw.get("executedQty", "0"))))
+            executed = Decimal(
+                str(raw.get("executed_volume", raw.get("executedQty", "0")))
+            )
             if executed < 0:
                 executed = Decimal("0")
 
@@ -237,7 +240,8 @@ class LiveBroker:
 
             orders.append(
                 Order(
-                    order_id=str(raw.get("uuid", raw.get("orderId", raw.get("id", "")))) or None,
+                    order_id=str(raw.get("uuid", raw.get("orderId", raw.get("id", ""))))
+                    or None,
                     client_order_id=str(
                         raw.get("uuid", raw.get("clientOrderId", raw.get("id", "")))
                     )
@@ -362,7 +366,9 @@ class LiveBroker:
         coin_currencies = [c for c in balances if c != qc and balances[c] > 0]
 
         known = [f"{c}/{qc}" for c in coin_currencies if c in self._trading_currencies]
-        dust = [f"{c}/{qc}" for c in coin_currencies if c not in self._trading_currencies]
+        dust = [
+            f"{c}/{qc}" for c in coin_currencies if c not in self._trading_currencies
+        ]
 
         tickers: dict[str, Mapping[str, object]] = {}
         if known:
@@ -391,11 +397,7 @@ class LiveBroker:
                 cached = self._ticker_cache.get(symbol)
                 ticker = cached[1] if cached else None
 
-            price = (
-                Decimal(str(ticker.get("price", 0)))
-                if ticker
-                else Decimal("0")
-            )
+            price = Decimal(str(ticker.get("price", 0))) if ticker else Decimal("0")
             total_quote += qty * price
 
             avg_buy_price = Decimal("0")
@@ -416,7 +418,9 @@ class LiveBroker:
                     )
                 )
             elif qty > 0:
-                _logger.debug("no_price_for_coin currency=%s qty=%s (dust?)", currency, str(qty))
+                _logger.debug(
+                    "no_price_for_coin currency=%s qty=%s (dust?)", currency, str(qty)
+                )
 
         snapshot = BalanceSnapshot(
             exchange=self.exchange,
@@ -474,7 +478,9 @@ class LiveBroker:
                 updated.append(updated_order)
             except Exception as e:
                 _logger.debug(
-                    "sync_order_status_failed order_id=%s error=%s", order.order_id, str(e)
+                    "sync_order_status_failed order_id=%s error=%s",
+                    order.order_id,
+                    str(e),
                 )
         return updated
 

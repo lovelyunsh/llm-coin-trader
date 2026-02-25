@@ -84,19 +84,16 @@ class StateStore:
         self._conn.execute("PRAGMA foreign_keys=ON;")
 
     def _init_schema(self) -> None:
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT,
                 timestamp TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS order_intents (
                 intent_id TEXT PRIMARY KEY,
                 signal_id TEXT,
@@ -111,11 +108,9 @@ class StateStore:
                 timestamp TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 client_order_id TEXT PRIMARY KEY,
                 order_id TEXT,
@@ -134,11 +129,9 @@ class StateStore:
                 updated_at TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS fills (
                 fill_id TEXT PRIMARY KEY,
                 order_id TEXT,
@@ -153,11 +146,9 @@ class StateStore:
                 timestamp TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS positions_snapshot (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 exchange TEXT,
@@ -169,11 +160,9 @@ class StateStore:
                 timestamp TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS balances_snapshot (
                 snapshot_id TEXT PRIMARY KEY,
                 exchange TEXT,
@@ -181,11 +170,9 @@ class StateStore:
                 total_value_krw TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS decisions_log (
                 decision_id TEXT PRIMARY KEY,
                 intent_id TEXT,
@@ -194,11 +181,9 @@ class StateStore:
                 timestamp TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
-        self._conn.execute(
-            """
+        self._conn.execute("""
             CREATE TABLE IF NOT EXISTS safety_events (
                 event_id TEXT PRIMARY KEY,
                 event_type TEXT,
@@ -208,11 +193,12 @@ class StateStore:
                 triggered_by TEXT,
                 data JSON
             )
-            """
-        )
+            """)
 
         # Indexes
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)"
+        )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_orders_exchange_symbol ON orders(exchange, symbol)"
         )
@@ -479,8 +465,7 @@ class StateStore:
 
     def get_positions(self) -> list[Position]:
         PositionModel = _models().Position
-        rows = self._conn.execute(
-            """
+        rows = self._conn.execute("""
             SELECT p.data
             FROM positions_snapshot p
             JOIN (
@@ -490,8 +475,7 @@ class StateStore:
             ) latest
             ON p.exchange = latest.exchange AND p.symbol = latest.symbol AND p.timestamp = latest.ts
             ORDER BY p.exchange, p.symbol
-            """.strip()
-        ).fetchall()
+            """.strip()).fetchall()
 
         positions: list[Position] = []
         for row in rows:

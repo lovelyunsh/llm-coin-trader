@@ -13,32 +13,27 @@ logger = get_logger("execution")
 
 
 class _Broker(Protocol):
-    async def place(self, intent: OrderIntent, client_order_id: str) -> Order:
-        ...
+    async def place(self, intent: OrderIntent, client_order_id: str) -> Order: ...
 
-    async def cancel(self, order_id: str) -> None:
-        ...
+    async def cancel(self, order_id: str) -> None: ...
 
-    async def fetch_open_orders(self) -> list[Order]:
-        ...
+    async def fetch_open_orders(self) -> list[Order]: ...
 
 
 class _RiskManager(Protocol):
-    async def validate(self, intent: OrderIntent, state: dict[str, object]) -> object:
-        ...
+    async def validate(
+        self, intent: OrderIntent, state: dict[str, object]
+    ) -> object: ...
 
 
 class _StateStore(Protocol):
-    def save_decision(self, decision: object) -> None:
-        ...
+    def save_decision(self, decision: object) -> None: ...
 
-    def save_order(self, order: Order) -> None:
-        ...
+    def save_order(self, order: Order) -> None: ...
 
 
 class _KillSwitch(Protocol):
-    def is_active(self) -> bool:
-        ...
+    def is_active(self) -> bool: ...
 
 
 class ExecutionEngine:
@@ -62,13 +57,17 @@ class ExecutionEngine:
         self.store = state_store
         self.kill_switch = kill_switch
 
-    async def execute(self, intent: OrderIntent, state: dict[str, object]) -> Order | None:
+    async def execute(
+        self, intent: OrderIntent, state: dict[str, object]
+    ) -> Order | None:
         """Execute an order intent through the full safety pipeline.
 
         Pipeline: kill_switch -> idempotency -> risk_check -> place_order -> persist
         """
         if self.kill_switch.is_active():
-            logger.warning("execution_blocked", symbol=intent.symbol, reason="kill_switch")
+            logger.warning(
+                "execution_blocked", symbol=intent.symbol, reason="kill_switch"
+            )
             return None
 
         client_order_id = self.idempotency.generate_key(intent.intent_id)
@@ -132,7 +131,9 @@ class ExecutionEngine:
             try:
                 await self.broker.cancel(order.order_id or order.client_order_id)
                 cancelled += 1
-                logger.info("order_cancelled", symbol=order.symbol, order_id=order.order_id)
+                logger.info(
+                    "order_cancelled", symbol=order.symbol, order_id=order.order_id
+                )
             except Exception as e:
                 logger.error("cancel_failed", order_id=order.order_id, error=str(e))
         return cancelled
