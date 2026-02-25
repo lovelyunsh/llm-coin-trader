@@ -51,9 +51,9 @@ class TechnicalIndicators:
     volume_ok: bool
     downtrend: bool
     rsi_overbought: bool
-    strong_downtrend: bool = False      # downtrend + ADX > 25 + -DI > +DI
-    momentum_bearish: bool = False      # MACD histogram declining + MACD < signal
-    short_reversal_risk: bool = False   # potential upside reversal (for covering shorts)
+    strong_downtrend: bool = False  # downtrend + ADX > 25 + -DI > +DI
+    momentum_bearish: bool = False  # MACD histogram declining + MACD < signal
+    short_reversal_risk: bool = False  # potential upside reversal (for covering shorts)
     _BOOL_FLAGS: ClassVar[frozenset[str]] = frozenset(
         {
             "uptrend",
@@ -78,7 +78,11 @@ class TechnicalIndicators:
         Renames ema200 → ema200_1h to clarify it is computed on 1h candles
         (~8-day moving average), NOT the traditional 200-day EMA.
         """
-        d = {k: v for k, v in dataclasses.asdict(self).items() if k not in self._BOOL_FLAGS}
+        d = {
+            k: v
+            for k, v in dataclasses.asdict(self).items()
+            if k not in self._BOOL_FLAGS
+        }
         if "ema200" in d:
             d["ema200_1h"] = d.pop("ema200")
         return d
@@ -131,9 +135,7 @@ class ConservativeStrategy:
         closes = [float(str(c.get("close", 0) or 0)) for c in candles]
         highs = [float(str(c.get("high", 0) or 0)) for c in candles]
         lows = [float(str(c.get("low", 0) or 0)) for c in candles]
-        volumes = [
-            float(str(c.get("volume", 0) or 0)) for c in candles
-        ]
+        volumes = [float(str(c.get("volume", 0) or 0)) for c in candles]
 
         if closes[-1] <= 0:
             return None
@@ -143,7 +145,9 @@ class ConservativeStrategy:
         ema200 = self._ema(closes, 200)
         atr = self._atr(highs, lows, closes, self.atr_period)
         rsi = self._rsi(closes, self.rsi_period)
-        adx_val, plus_di_val, minus_di_val = self._adx(highs, lows, closes, self.atr_period)
+        adx_val, plus_di_val, minus_di_val = self._adx(
+            highs, lows, closes, self.atr_period
+        )
         macd_line, signal_line, histogram = self._macd(closes)
         bb_upper, bb_middle, bb_lower, bb_width = self._bollinger_bands(closes)
 
@@ -160,14 +164,20 @@ class ConservativeStrategy:
 
         vol_ratio = current_atr / current_price if current_price > 0 else 1.0
         trend_strength = (
-            (current_fast - current_slow) / current_slow * 100 if current_slow > 0 else 0.0
+            (current_fast - current_slow) / current_slow * 100
+            if current_slow > 0
+            else 0.0
         )
 
         current_macd = macd_line
         current_signal = signal_line
-        strong_downtrend = current_fast < current_slow and adx_val > 25 and minus_di_val > plus_di_val
+        strong_downtrend = (
+            current_fast < current_slow and adx_val > 25 and minus_di_val > plus_di_val
+        )
         momentum_bearish = histogram < 0 and current_macd < current_signal
-        short_reversal_risk = current_fast > current_slow or current_rsi < 30 or histogram > 0
+        short_reversal_risk = (
+            current_fast > current_slow or current_rsi < 30 or histogram > 0
+        )
 
         return TechnicalIndicators(
             fast_ema=round(current_fast, 2),
@@ -253,8 +263,14 @@ class ConservativeStrategy:
             ]
 
         # SHORT signal: strong downtrend AND bearish momentum (conservative, all must be true)
-        if self._futures_enabled and indicators.strong_downtrend and indicators.momentum_bearish:
-            confidence = min(0.9, self.min_confidence + abs(indicators.trend_strength) / 100)
+        if (
+            self._futures_enabled
+            and indicators.strong_downtrend
+            and indicators.momentum_bearish
+        ):
+            confidence = min(
+                0.9, self.min_confidence + abs(indicators.trend_strength) / 100
+            )
             if confidence >= self.min_confidence:
                 return [
                     Signal(
@@ -393,7 +409,9 @@ class ConservativeStrategy:
             up_move = highs[i] - highs[i - 1]
             down_move = lows[i - 1] - lows[i]
             plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
-            minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+            minus_dm.append(
+                down_move if (down_move > up_move and down_move > 0) else 0.0
+            )
             tr.append(
                 max(
                     highs[i] - lows[i],

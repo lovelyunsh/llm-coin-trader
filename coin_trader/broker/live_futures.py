@@ -43,26 +43,19 @@ class BinanceFuturesAdapter(Protocol):
         position_side: str | None,
         stop_price: Decimal | None,
         time_in_force: str | None,
-    ) -> Mapping[str, object]:
-        ...
+    ) -> Mapping[str, object]: ...
 
-    async def cancel_order(self, order_id: str, symbol: str) -> object:
-        ...
+    async def cancel_order(self, order_id: str, symbol: str) -> object: ...
 
-    async def get_open_orders(self, symbol: str | None) -> object:
-        ...
+    async def get_open_orders(self, symbol: str | None) -> object: ...
 
-    async def get_order(self, order_id: str, symbol: str) -> Mapping[str, object]:
-        ...
+    async def get_order(self, order_id: str, symbol: str) -> Mapping[str, object]: ...
 
-    async def get_balances(self) -> object:
-        ...
+    async def get_balances(self) -> object: ...
 
-    async def get_positions(self) -> object:
-        ...
+    async def get_positions(self) -> object: ...
 
-    def normalize_symbol(self, symbol: str) -> str:
-        ...
+    def normalize_symbol(self, symbol: str) -> str: ...
 
 
 # Binance futures order status mapping
@@ -212,7 +205,9 @@ class LiveFuturesBroker:
 
         return Order(
             order_id=str(order_id) if order_id is not None else None,
-            client_order_id=str(client_order_id_raw) if client_order_id_raw else str(uuid4()),
+            client_order_id=(
+                str(client_order_id_raw) if client_order_id_raw else str(uuid4())
+            ),
             intent_id=resolved_intent_id,  # type: ignore[arg-type]
             exchange=self.exchange,
             symbol=symbol,
@@ -239,7 +234,9 @@ class LiveFuturesBroker:
             # Futures: size in base asset only; use price for conversion
             ref_price = intent.price
             if ref_price is None or ref_price <= 0:
-                raise ValueError("price must be provided to convert quote_quantity for futures")
+                raise ValueError(
+                    "price must be provided to convert quote_quantity for futures"
+                )
             quantity = intent.quote_quantity / ref_price
 
         if quantity is None or quantity <= 0:
@@ -444,7 +441,9 @@ class LiveFuturesBroker:
                         pass
 
                     margin_type_raw = str(raw.get("marginType", "isolated")).lower()
-                    margin_type = "isolated" if margin_type_raw == "isolated" else "cross"
+                    margin_type = (
+                        "isolated" if margin_type_raw == "isolated" else "cross"
+                    )
 
                     pos_side_raw = str(raw.get("positionSide", "both")).lower()
                     # Infer side from sign of positionAmt if positionSide is "both"
@@ -507,7 +506,9 @@ class LiveFuturesBroker:
                 if not raw:
                     continue
 
-                new_status = self._parse_order_status(str(raw.get("status", "")).lower())
+                new_status = self._parse_order_status(
+                    str(raw.get("status", "")).lower()
+                )
                 if new_status == order.status:
                     continue
 

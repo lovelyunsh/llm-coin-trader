@@ -27,10 +27,16 @@ class KeyManager:
         return base64.urlsafe_b64encode(key_bytes)
 
     @staticmethod
-    def encrypt_keys(api_key: str, api_secret: str, key_file: Path, master_key: str) -> None:
+    def encrypt_keys(
+        api_key: str, api_secret: str, key_file: Path, master_key: str
+    ) -> None:
         fernet_key = KeyManager._derive_fernet_key(master_key)
         cipher = KeyManager._get_fernet()(fernet_key)
-        payload = {"version": KeyManager.VERSION, "api_key": api_key, "api_secret": api_secret}
+        payload = {
+            "version": KeyManager.VERSION,
+            "api_key": api_key,
+            "api_secret": api_secret,
+        }
         encrypted = cipher.encrypt(json.dumps(payload).encode())
         key_file.parent.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(encrypted)

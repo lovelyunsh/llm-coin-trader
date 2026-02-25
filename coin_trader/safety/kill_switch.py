@@ -13,7 +13,9 @@ class KillSwitch:
     _active: bool
     _lock: threading.Lock
 
-    def __init__(self, kill_switch_file: Path, *, install_signal_handlers: bool = False) -> None:
+    def __init__(
+        self, kill_switch_file: Path, *, install_signal_handlers: bool = False
+    ) -> None:
         self._file = kill_switch_file
         self._active = False
         self._lock = threading.Lock()

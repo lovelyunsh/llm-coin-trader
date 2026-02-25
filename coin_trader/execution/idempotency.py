@@ -7,13 +7,11 @@ from uuid import UUID
 
 
 class _Cursor(Protocol):
-    def fetchone(self) -> object | None:
-        ...
+    def fetchone(self) -> object | None: ...
 
 
 class _Conn(Protocol):
-    def execute(self, sql: str, params: tuple[object, ...]) -> _Cursor:
-        ...
+    def execute(self, sql: str, params: tuple[object, ...]) -> _Cursor: ...
 
 
 class _Store(Protocol):

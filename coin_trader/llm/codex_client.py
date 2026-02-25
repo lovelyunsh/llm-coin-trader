@@ -127,7 +127,9 @@ async def query_codex(
             final_text: str | None = None
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-                async with client.stream("POST", _CODEX_URL, headers=headers, json=body) as resp:
+                async with client.stream(
+                    "POST", _CODEX_URL, headers=headers, json=body
+                ) as resp:
                     _ = resp.raise_for_status()
 
                     async for line in resp.aiter_lines():
@@ -151,7 +153,9 @@ async def query_codex(
                             if isinstance(delta, str) and delta:
                                 delta_parts.append(delta)
 
-                        output_text = _extract_output_text_from_output(event.get("output"))
+                        output_text = _extract_output_text_from_output(
+                            event.get("output")
+                        )
                         if isinstance(output_text, str) and output_text:
                             final_text = output_text
 
@@ -167,7 +171,9 @@ async def query_codex(
             raw_text = e.response.text
         except Exception:
             raw_text = ""
-        logger.error("codex_http_status_error status=%s body=%s", str(status), raw_text[:1000])
+        logger.error(
+            "codex_http_status_error status=%s body=%s", str(status), raw_text[:1000]
+        )
         return None
     except Exception:
         logger.exception("codex_query_failed")

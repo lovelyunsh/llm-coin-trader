@@ -21,8 +21,7 @@ class _JwtEncode(Protocol):
         payload: Mapping[str, object],
         key: str,
         algorithm: str,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 _jwt_encode = cast(_JwtEncode, jwt.encode)
@@ -113,7 +112,9 @@ class UpbitAdapter(BaseExchangeAdapter):
     _access_key: str
     _secret_key: str
 
-    def __init__(self, access_key: str, secret_key: str, rate_limit_delay: float = 0.2) -> None:
+    def __init__(
+        self, access_key: str, secret_key: str, rate_limit_delay: float = 0.2
+    ) -> None:
         super().__init__(base_url=self.UPBIT_API_URL, rate_limit_delay=rate_limit_delay)
         self._access_key = access_key
         self._secret_key = secret_key
@@ -196,7 +197,9 @@ class UpbitAdapter(BaseExchangeAdapter):
         if symbol:
             params["market"] = self.denormalize_symbol(symbol)
         headers = self._auth_headers(params)
-        result = await self._request("GET", "/orders/open", params=params, headers=headers)
+        result = await self._request(
+            "GET", "/orders/open", params=params, headers=headers
+        )
         if not isinstance(result, list):
             return []
         orders: list[JsonObject] = []
@@ -268,7 +271,9 @@ class UpbitAdapter(BaseExchangeAdapter):
         return await self.get_tradeable_markets()
 
     async def get_tradeable_markets(self) -> list[str]:
-        result = await self._request("GET", "/market/all", params={"isDetails": "false"})
+        result = await self._request(
+            "GET", "/market/all", params={"isDetails": "false"}
+        )
         if not isinstance(result, list):
             return []
 
@@ -358,7 +363,9 @@ class UpbitAdapter(BaseExchangeAdapter):
         """Get withdrawal history. Upbit API: GET /v1/withdraws"""
         params: QueryParams = {"limit": str(limit), "order_by": "asc"}
         headers = self._auth_headers(params)
-        result = await self._request("GET", "/withdraws", params=params, headers=headers)
+        result = await self._request(
+            "GET", "/withdraws", params=params, headers=headers
+        )
         if not isinstance(result, list):
             return []
         withdraws: list[JsonObject] = []

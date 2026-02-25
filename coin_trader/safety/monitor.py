@@ -79,8 +79,12 @@ class AnomalyMonitor:
         self.balance_mismatch_threshold_pct = _cfg_decimal(
             config, "balance_mismatch_threshold_pct", Decimal("1.0")
         )
-        self.price_change_threshold_pct = _cfg_decimal(config, "price_change_threshold_pct", Decimal("10.0"))
-        self.spread_threshold_pct = _cfg_decimal(config, "spread_threshold_pct", Decimal("5.0"))
+        self.price_change_threshold_pct = _cfg_decimal(
+            config, "price_change_threshold_pct", Decimal("10.0")
+        )
+        self.spread_threshold_pct = _cfg_decimal(
+            config, "spread_threshold_pct", Decimal("5.0")
+        )
         self._consecutive_api_failures = 0
         self._prev_prices = {}
 
@@ -100,7 +104,9 @@ class AnomalyMonitor:
             )
         return None
 
-    def check_balance_mismatch(self, expected: Decimal, actual: Decimal) -> SafetyEvent | None:
+    def check_balance_mismatch(
+        self, expected: Decimal, actual: Decimal
+    ) -> SafetyEvent | None:
         if expected == ZERO and actual == ZERO:
             return None
         max_val = max(abs(expected), abs(actual))

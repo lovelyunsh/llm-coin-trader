@@ -48,7 +48,13 @@ class LLMAdvice:
             return None
 
         action_raw = str(data.get("action", "HOLD")).upper()
-        valid_actions = {"HOLD", "BUY_CONSIDER", "SELL_CONSIDER", "SHORT_CONSIDER", "COVER_CONSIDER"}
+        valid_actions = {
+            "HOLD",
+            "BUY_CONSIDER",
+            "SELL_CONSIDER",
+            "SHORT_CONSIDER",
+            "COVER_CONSIDER",
+        }
         if action_raw not in valid_actions:
             action_raw = "HOLD"
 
@@ -551,7 +557,9 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
                 object.__setattr__(advice, "_prompt", user_prompt)
             return advice
         except Exception as e:
-            logger.error("llm_error error=%s symbol=%s mode=%s", str(e), symbol, self._auth_mode)
+            logger.error(
+                "llm_error error=%s symbol=%s mode=%s", str(e), symbol, self._auth_mode
+            )
             return None
 
     async def get_symbol_universe(
@@ -636,7 +644,9 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        data = await self._post_json(f"{self._base_url}/chat/completions", body, headers)
+        data = await self._post_json(
+            f"{self._base_url}/chat/completions", body, headers
+        )
         if data is None:
             return None
         choices_obj = data.get("choices")
@@ -768,7 +778,9 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        data = await self._post_json(f"{self._base_url}/chat/completions", body, headers)
+        data = await self._post_json(
+            f"{self._base_url}/chat/completions", body, headers
+        )
         if data is None:
             return None
         choices_obj = data.get("choices")

@@ -208,7 +208,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 csrf_cookie = request.cookies.get(_CSRF_COOKIE, "")
                 csrf_header = request.headers.get(_CSRF_HEADER, "")
                 if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_header):
-                    return JSONResponse({"error": "CSRF token mismatch"}, status_code=403)
+                    return JSONResponse(
+                        {"error": "CSRF token mismatch"}, status_code=403
+                    )
             return await call_next(request)
 
         if path.startswith("/api/"):
@@ -243,7 +245,11 @@ async def auth_login(request: Request) -> JSONResponse:
             status_code=429,
         )
 
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    body = (
+        await request.json()
+        if request.headers.get("content-type") == "application/json"
+        else {}
+    )
     code = body.get("code", "") if isinstance(body, dict) else ""
 
     if not hmac.compare_digest(str(code), settings.web_master_code):
@@ -327,7 +333,11 @@ async def get_status() -> JSONResponse:
 # ---------------------------------------------------------------------------
 async def _trading_loop() -> None:
     global _is_trading
-    from coin_trader.main import _fetch_batch_tickers, _refresh_dynamic_symbols, _run_tick
+    from coin_trader.main import (
+        _fetch_batch_tickers,
+        _refresh_dynamic_symbols,
+        _run_tick,
+    )
 
     settings: Settings = _components["settings"]
     engine: Any = _components.get("engine")
@@ -336,7 +346,9 @@ async def _trading_loop() -> None:
         while _is_trading:
             if engine is not None:
                 try:
-                    cancelled = await engine.cancel_stale_orders(settings.stale_order_timeout_sec)
+                    cancelled = await engine.cancel_stale_orders(
+                        settings.stale_order_timeout_sec
+                    )
                     for order in cancelled:
                         if notifier and hasattr(notifier, "send_alert"):
                             await notifier.send_alert(
@@ -361,7 +373,9 @@ async def _trading_loop() -> None:
 
             active_symbols = await _refresh_dynamic_symbols(_components)
             exchange_adapter = _components.get("exchange_adapter")
-            batched_tickers = await _fetch_batch_tickers(exchange_adapter, active_symbols)
+            batched_tickers = await _fetch_batch_tickers(
+                exchange_adapter, active_symbols
+            )
 
             for symbol in active_symbols:
                 if not _is_trading:
@@ -387,9 +401,15 @@ async def start_trading(request: Request) -> JSONResponse:
     global _trading_task, _is_trading, _trading_mode
 
     if _is_trading:
-        return JSONResponse({"ok": False, "error": "이미 거래가 실행 중입니다"}, status_code=409)
+        return JSONResponse(
+            {"ok": False, "error": "이미 거래가 실행 중입니다"}, status_code=409
+        )
 
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    body = (
+        await request.json()
+        if request.headers.get("content-type") == "application/json"
+        else {}
+    )
     mode = body.get("mode", "paper") if isinstance(body, dict) else "paper"
 
     settings: Settings = _components["settings"]
@@ -427,7 +447,9 @@ async def stop_trading() -> JSONResponse:
     global _is_trading, _trading_task
 
     if not _is_trading:
-        return JSONResponse({"ok": False, "error": "거래가 실행 중이 아닙니다"}, status_code=409)
+        return JSONResponse(
+            {"ok": False, "error": "거래가 실행 중이 아닙니다"}, status_code=409
+        )
 
     _is_trading = False
     if _trading_task and not _trading_task.done():
@@ -451,9 +473,15 @@ async def activate_kill_switch(request: Request) -> JSONResponse:
 
     kill_switch: KillSwitch | None = _components.get("kill_switch")
     if not kill_switch:
-        return JSONResponse({"ok": False, "error": "Kill switch not initialized"}, status_code=500)
+        return JSONResponse(
+            {"ok": False, "error": "Kill switch not initialized"}, status_code=500
+        )
 
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    body = (
+        await request.json()
+        if request.headers.get("content-type") == "application/json"
+        else {}
+    )
     reason = (
         body.get("reason", "웹 대시보드에서 수동 활성화")
         if isinstance(body, dict)
@@ -463,7 +491,12 @@ async def activate_kill_switch(request: Request) -> JSONResponse:
     kill_switch.activate(reason)
     notifier = _components.get("notifier")
     settings: Settings | None = _components.get("settings")
-    if notifier and settings and settings.is_live_mode() and hasattr(notifier, "send_alert"):
+    if (
+        notifier
+        and settings
+        and settings.is_live_mode()
+        and hasattr(notifier, "send_alert")
+    ):
         try:
             await notifier.send_alert("킬 스위치 활성화", f"사유: {reason}", "critical")
         except Exception:
@@ -487,7 +520,9 @@ async def activate_kill_switch(request: Request) -> JSONResponse:
 async def deactivate_kill_switch() -> JSONResponse:
     kill_switch: KillSwitch | None = _components.get("kill_switch")
     if not kill_switch:
-        return JSONResponse({"ok": False, "error": "Kill switch not initialized"}, status_code=500)
+        return JSONResponse(
+            {"ok": False, "error": "Kill switch not initialized"}, status_code=500
+        )
 
     kill_switch.deactivate()
     _invalidate_api_cache()
@@ -611,7 +646,9 @@ async def get_safety_events() -> JSONResponse:
 # ---------------------------------------------------------------------------
 # Decisions
 # ---------------------------------------------------------------------------
-def _read_decision_logs(symbol: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+def _read_decision_logs(
+    symbol: str | None = None, limit: int = 50
+) -> list[dict[str, Any]]:
     import json as _json
 
     settings: Settings | None = _components.get("settings")
@@ -738,7 +775,9 @@ async def get_pnl() -> JSONResponse:
                     initial_balance = total_value
 
             total_pnl = total_value - initial_balance
-            total_pnl_pct = (total_pnl / initial_balance * 100) if initial_balance > 0 else 0.0
+            total_pnl_pct = (
+                (total_pnl / initial_balance * 100) if initial_balance > 0 else 0.0
+            )
 
             position_pnls = []
             for p in positions:
@@ -787,7 +826,8 @@ async def manual_buy(request: Request) -> JSONResponse:
 
     if not engine or not broker or not exchange_adapter or not settings:
         return JSONResponse(
-            {"ok": False, "error": "시스템 컴포넌트가 초기화되지 않았습니다"}, status_code=500
+            {"ok": False, "error": "시스템 컴포넌트가 초기화되지 않았습니다"},
+            status_code=500,
         )
 
     try:
@@ -796,7 +836,9 @@ async def manual_buy(request: Request) -> JSONResponse:
         amount_krw = body.get("amount_krw")
 
         if not symbol or not amount_krw:
-            return JSONResponse({"ok": False, "error": "심볼과 금액을 입력하세요"}, status_code=400)
+            return JSONResponse(
+                {"ok": False, "error": "심볼과 금액을 입력하세요"}, status_code=400
+            )
 
         if symbol not in settings.trading_symbols:
             return JSONResponse(
@@ -856,7 +898,8 @@ async def manual_buy(request: Request) -> JSONResponse:
             return JSONResponse({"ok": True, "order": _model_to_dict(order)})
         else:
             return JSONResponse(
-                {"ok": False, "error": "주문이 리스크 체크에서 거부되었습니다"}, status_code=400
+                {"ok": False, "error": "주문이 리스크 체크에서 거부되었습니다"},
+                status_code=400,
             )
 
     except Exception as e:
@@ -874,7 +917,8 @@ async def manual_sell(request: Request) -> JSONResponse:
 
     if not engine or not broker or not exchange_adapter or not settings:
         return JSONResponse(
-            {"ok": False, "error": "시스템 컴포넌트가 초기화되지 않았습니다"}, status_code=500
+            {"ok": False, "error": "시스템 컴포넌트가 초기화되지 않았습니다"},
+            status_code=500,
         )
 
     try:
@@ -883,7 +927,9 @@ async def manual_sell(request: Request) -> JSONResponse:
         quantity = body.get("quantity")
 
         if not symbol:
-            return JSONResponse({"ok": False, "error": "심볼을 입력하세요"}, status_code=400)
+            return JSONResponse(
+                {"ok": False, "error": "심볼을 입력하세요"}, status_code=400
+            )
 
         positions = await broker.fetch_positions()
         position = next((p for p in positions if p.symbol == symbol), None)
@@ -946,7 +992,8 @@ async def manual_sell(request: Request) -> JSONResponse:
             return JSONResponse({"ok": True, "order": _model_to_dict(order)})
         else:
             return JSONResponse(
-                {"ok": False, "error": "주문이 리스크 체크에서 거부되었습니다"}, status_code=400
+                {"ok": False, "error": "주문이 리스크 체크에서 거부되었습니다"},
+                status_code=400,
             )
 
     except Exception as e:

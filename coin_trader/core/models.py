@@ -19,22 +19,25 @@ F = TypeVar("F")
 if TYPE_CHECKING:
     # Minimal stubs so the module type-checks without importing pydantic.
     class BaseModel:  # noqa: D101
-        def __init__(self, **data: object) -> None:
-            ...
+        def __init__(self, **data: object) -> None: ...
 
         @classmethod
-        def model_validate(cls: type["BaseModel"], _data: object) -> "BaseModel":
-            ...
+        def model_validate(cls: type["BaseModel"], _data: object) -> "BaseModel": ...
 
     def Field(
-        _default: object = ..., *, _expected_type: type[T] | None = None, **_kwargs: object
+        _default: object = ...,
+        *,
+        _expected_type: type[T] | None = None,
+        **_kwargs: object,
     ) -> T:  # noqa: D103
         raise NotImplementedError
 
     def computed_field(func: T) -> T:  # noqa: D103
         return func
 
-    def model_validator(*_args: object, **_kwargs: object) -> Callable[[F], F]:  # noqa: D103
+    def model_validator(
+        *_args: object, **_kwargs: object
+    ) -> Callable[[F], F]:  # noqa: D103
         def _decorator(func: F) -> F:
             return func
 

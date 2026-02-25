@@ -20,7 +20,10 @@ if TYPE_CHECKING:
             raise NotImplementedError
 
     def Field(
-        _default: object = ..., *, _expected_type: type[T] | None = None, **_kwargs: object
+        _default: object = ...,
+        *,
+        _expected_type: type[T] | None = None,
+        **_kwargs: object,
     ) -> T:  # noqa: D103
         raise NotImplementedError
 
@@ -178,7 +181,9 @@ class Settings(BaseSettings):
                 object.__setattr__(self, "dynamic_symbol_min_turnover_24h", 10_000_000)
 
     def get_always_keep_symbols(self) -> list[str]:
-        parts = [p.strip().upper() for p in self.always_keep_symbols.split(",") if p.strip()]
+        parts = [
+            p.strip().upper() for p in self.always_keep_symbols.split(",") if p.strip()
+        ]
         out: list[str] = []
         for symbol in parts:
             if "/" not in symbol:

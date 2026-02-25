@@ -34,7 +34,12 @@ from coin_trader.core.models import (
 )
 from coin_trader.execution.engine import ExecutionEngine
 from coin_trader.execution.idempotency import IdempotencyManager
-from coin_trader.logging.logger import close_logging, get_logger, log_event, setup_logging
+from coin_trader.logging.logger import (
+    close_logging,
+    get_logger,
+    log_event,
+    setup_logging,
+)
 from coin_trader.risk.manager import RiskManager
 from coin_trader.safety.kill_switch import KillSwitch
 from coin_trader.safety.monitor import AnomalyMonitor
@@ -74,7 +79,9 @@ _previous_universe_selections: list[dict[str, object]] = []
 _MAX_UNIVERSE_HISTORY = 3
 
 
-def _build_system(settings: Settings, *, install_signal_handlers: bool = False) -> dict[str, Any]:
+def _build_system(
+    settings: Settings, *, install_signal_handlers: bool = False
+) -> dict[str, Any]:
     setup_logging(log_dir=settings.log_dir, log_level=settings.log_level)
     store = StateStore(db_path=settings.db_path)
     kill_switch = KillSwitch(
@@ -106,7 +113,9 @@ def _build_system(settings: Settings, *, install_signal_handlers: bool = False) 
             )
             from coin_trader.exchange.upbit import UpbitAdapter
 
-            exchange_adapter = UpbitAdapter(access_key=access_key, secret_key=secret_key)
+            exchange_adapter = UpbitAdapter(
+                access_key=access_key, secret_key=secret_key
+            )
 
             from coin_trader.broker.live import LiveBroker
 
@@ -257,10 +266,8 @@ def _resolve_action(
         return strategy_type.value.upper()
 
     if advice is None:
-        # LLM skipped or failed: use strategy signal as fallback for SELL only
-        # (protects existing positions), but remain HOLD for new buys
-        if strategy_type == SignalType.SELL:
-            return "SELL"
+        # LLM skipped or failed: hold position.
+        # Hard stop-loss / trailing stop are handled independently in position_protection (section 8).
         return "HOLD"
 
     llm_action = advice.action
@@ -351,16 +358,16 @@ def _compute_volume_context(
     if len(candles) < window + 1:
         return {"volume_vs_avg_ratio": 1.0, "volume_trend": "flat"}
 
-    volumes = [
-        float(str(c.get("volume", 0) or 0)) for c in candles
-    ]
+    volumes = [float(str(c.get("volume", 0) or 0)) for c in candles]
     recent = volumes[-window:]
     avg = sum(recent) / len(recent) if recent else 1.0
     current = volumes[-1] if volumes else 0.0
     ratio = round(current / avg, 2) if avg > 0 else 0.0
 
     first_half = sum(recent[: window // 2]) / (window // 2) if window >= 2 else avg
-    second_half = sum(recent[window // 2 :]) / (window - window // 2) if window >= 2 else avg
+    second_half = (
+        sum(recent[window // 2 :]) / (window - window // 2) if window >= 2 else avg
+    )
     threshold = 0.1
     if second_half > first_half * (1 + threshold):
         trend = "increasing"
@@ -370,9 +377,6 @@ def _compute_volume_context(
         trend = "flat"
 
     return {"volume_vs_avg_ratio": ratio, "volume_trend": trend}
-
-
-
 
 
 async def _compute_btc_trend(
@@ -395,7 +399,10 @@ async def _compute_btc_trend(
 
     try:
         # Fetch daily candles (refresh hourly) — separate from hourly trading candles
-        if not _btc_daily_candles or now - _btc_daily_candles_ts >= _BTC_DAILY_CANDLE_REFRESH:
+        if (
+            not _btc_daily_candles
+            or now - _btc_daily_candles_ts >= _BTC_DAILY_CANDLE_REFRESH
+        ):
             _btc_daily_candles = await exchange_adapter.get_candles(
                 _btc_reference_symbol, interval="1d", count=200
             )
@@ -407,6 +414,7 @@ async def _compute_btc_trend(
         # Use separate strategy instance to avoid polluting hourly candle history
         if _btc_daily_strategy is None:
             from coin_trader.strategy.conservative import ConservativeStrategy
+
             _btc_daily_strategy = ConservativeStrategy()
 
         _btc_daily_strategy.update_candles(_btc_reference_symbol, _btc_daily_candles)
@@ -522,7 +530,9 @@ def _compute_candidate_score(
     elif abs_change < Decimal("1"):
         momentum = abs_change
     else:
-        momentum = max(Decimal("0"), Decimal("1") - (abs_change - Decimal("8")) / Decimal("20"))
+        momentum = max(
+            Decimal("0"), Decimal("1") - (abs_change - Decimal("8")) / Decimal("20")
+        )
 
     # Volatility: 3-10% range ideal for short-term trading
     if Decimal("3") <= range_pct <= Decimal("10"):
@@ -579,7 +589,9 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
         settings.trading_symbols = list(_dynamic_symbols_cache)
         return list(_dynamic_symbols_cache)
 
-    if exchange_adapter is None or not hasattr(exchange_adapter, "get_tradeable_markets"):
+    if exchange_adapter is None or not hasattr(
+        exchange_adapter, "get_tradeable_markets"
+    ):
         return list(settings.trading_symbols)
 
     markets_raw = await exchange_adapter.get_tradeable_markets()
@@ -593,11 +605,13 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
         part = await _fetch_batch_tickers(exchange_adapter, chunk)
         tickers.update(part)
 
-    min_turnover = Decimal(str(
-        settings.dynamic_symbol_min_turnover_24h
-        if settings.exchange == ExchangeName.BINANCE
-        else settings.dynamic_symbol_min_krw_24h
-    ))
+    min_turnover = Decimal(
+        str(
+            settings.dynamic_symbol_min_turnover_24h
+            if settings.exchange == ExchangeName.BINANCE
+            else settings.dynamic_symbol_min_krw_24h
+        )
+    )
     eligible_turnovers: dict[str, Decimal] = {}
     for symbol, ticker in tickers.items():
         turnover = Decimal(str(ticker.get("turnover_24h", 0)))
@@ -623,12 +637,14 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
                 pnl_pct = Decimal("0")
                 if entry_price > 0 and cur_price > 0:
                     pnl_pct = (cur_price - entry_price) / entry_price * Decimal("100")
-                held_positions_data.append({
-                    "symbol": p.symbol,
-                    "unrealized_pnl_pct": str(round(pnl_pct, 2)),
-                    "entry_price": str(entry_price),
-                    "current_price": str(cur_price),
-                })
+                held_positions_data.append(
+                    {
+                        "symbol": p.symbol,
+                        "unrealized_pnl_pct": str(round(pnl_pct, 2)),
+                        "entry_price": str(entry_price),
+                        "current_price": str(cur_price),
+                    }
+                )
         except Exception:
             pass
 
@@ -667,7 +683,9 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
             range_pct = (high_price - low_price) / trade_price * Decimal("100")
         dist_from_high_pct = Decimal("0")
         if high_price > 0:
-            dist_from_high_pct = (high_price - trade_price) / high_price * Decimal("100")
+            dist_from_high_pct = (
+                (high_price - trade_price) / high_price * Decimal("100")
+            )
 
         # Extract best bid/ask from orderbook (canonical: bids/asks as [[price,qty],...])
         bid = trade_price
@@ -701,7 +719,9 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
     spread_limit = settings.dynamic_symbol_max_spread_bps
     abs_change_limit = settings.dynamic_symbol_max_abs_change_24h_pct
     range_limit = settings.dynamic_symbol_max_intraday_range_pct
-    max_turnover = max(eligible_turnovers.values()) if eligible_turnovers else Decimal("1")
+    max_turnover = (
+        max(eligible_turnovers.values()) if eligible_turnovers else Decimal("1")
+    )
 
     scored: list[tuple[str, Decimal]] = []
     for symbol, turnover in eligible_turnovers.items():
@@ -720,10 +740,9 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
         scored.append((symbol, score))
     scored.sort(key=lambda item: item[1], reverse=True)
 
-    llm_rank_base = [
-        symbol for symbol, _ in scored
-        if symbol not in forced_symbols
-    ][:candidate_k]
+    llm_rank_base = [symbol for symbol, _ in scored if symbol not in forced_symbols][
+        :candidate_k
+    ]
     if not llm_rank_base:
         fallback = sorted(eligible_turnovers.items(), key=lambda x: x[1], reverse=True)
         llm_rank_base = [s for s, _ in fallback[:top_k] if s not in forced_symbols]
@@ -785,13 +804,17 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
             break
 
     # Track selection history for future LLM context
-    _previous_universe_selections.append({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "selected": selected,
-        "reasoning": llm_decision.reasoning if llm_decision else "",
-    })
+    _previous_universe_selections.append(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "selected": selected,
+            "reasoning": llm_decision.reasoning if llm_decision else "",
+        }
+    )
     if len(_previous_universe_selections) > _MAX_UNIVERSE_HISTORY:
-        _previous_universe_selections = _previous_universe_selections[-_MAX_UNIVERSE_HISTORY:]
+        _previous_universe_selections = _previous_universe_selections[
+            -_MAX_UNIVERSE_HISTORY:
+        ]
 
     log_event(
         "symbol_decision",
@@ -805,7 +828,9 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
             "llm_used": llm_decision is not None,
             "forced_symbols": forced_symbols,
             "active_symbols_before": _dynamic_symbols_cache,
-            "llm_selected_symbols": llm_decision.selected_symbols if llm_decision else [],
+            "llm_selected_symbols": (
+                llm_decision.selected_symbols if llm_decision else []
+            ),
             "llm_reasoning": llm_decision.reasoning if llm_decision else "",
             "llm_prompt": llm_decision.prompt if llm_decision else "",
             "selected_symbols": selected,
@@ -858,7 +883,9 @@ async def _run_tick(
                 kill_switch.activate(f"API failure threshold reached: {e}")
                 if notifier:
                     await notifier.send_alert(
-                        "API Failure", f"Consecutive API failures on {symbol}", "critical"
+                        "API Failure",
+                        f"Consecutive API failures on {symbol}",
+                        "critical",
                     )
             return
     else:
@@ -893,7 +920,9 @@ async def _run_tick(
     if prev_close > 0:
         price_change_pct = abs(trade_price - prev_close) / prev_close * Decimal("100")
         if risk_manager.check_circuit_breaker(price_change_pct):
-            logger.warning("circuit_breaker", symbol=symbol, change_pct=f"{price_change_pct:.1f}%")
+            logger.warning(
+                "circuit_breaker", symbol=symbol, change_pct=f"{price_change_pct:.1f}%"
+            )
             if notifier:
                 await notifier.send_alert(
                     "Circuit Breaker",
@@ -914,7 +943,9 @@ async def _run_tick(
             pass
 
     # Inject synthetic in-progress candle so indicators reflect current price
-    synthetic = _build_synthetic_candle(ticker, base_candles[-1] if base_candles else None)
+    synthetic = _build_synthetic_candle(
+        ticker, base_candles[-1] if base_candles else None
+    )
     strategy.update_candles(symbol, base_candles + [synthetic])
 
     # 5. Run strategy
@@ -925,12 +956,16 @@ async def _run_tick(
     positions = await broker.fetch_positions()
     store.save_balance_snapshot(balances)
 
-    total_balance = balances.total_value_quote or balances.total_value_krw or Decimal("0")
+    total_balance = (
+        balances.total_value_quote or balances.total_value_krw or Decimal("0")
+    )
     current_symbol_value = Decimal("0")
     for p in positions:
         if p.symbol != symbol or p.quantity <= 0:
             continue
-        pos_price = trade_price if p.symbol == symbol else (p.current_price or Decimal("0"))
+        pos_price = (
+            trade_price if p.symbol == symbol else (p.current_price or Decimal("0"))
+        )
         current_symbol_value += p.quantity * pos_price
 
     state: dict[str, Any] = {
@@ -970,7 +1005,9 @@ async def _run_tick(
         try:
             change_24h_pct = Decimal("0")
             if prev_close > 0:
-                change_24h_pct = (trade_price - prev_close) / prev_close * Decimal("100")
+                change_24h_pct = (
+                    (trade_price - prev_close) / prev_close * Decimal("100")
+                )
 
             market_summary: dict[str, object] = {
                 "symbol": symbol,
@@ -1013,13 +1050,19 @@ async def _run_tick(
                         "quantity": str(p.quantity),
                         "average_entry_price": str(p.average_entry_price),
                         "current_price": str(pos_price),
-                        "unrealized_pnl_pct": str(pos_with_price.unrealized_pnl_pct or 0),
+                        "unrealized_pnl_pct": str(
+                            pos_with_price.unrealized_pnl_pct or 0
+                        ),
                     }
                 )
 
             portfolio_exposure = _compute_portfolio_exposure(positions, total_balance)
 
-            quote = settings.quote_currency if hasattr(settings, "quote_currency") else "KRW"
+            quote = (
+                settings.quote_currency
+                if hasattr(settings, "quote_currency")
+                else "KRW"
+            )
             available_cash = balances.balances.get(quote, Decimal("0"))
             balance_data: dict[str, object] = {
                 f"total_portfolio_value_{quote.lower()}": str(total_balance),
@@ -1069,8 +1112,12 @@ async def _run_tick(
 
             risk_context: dict[str, object] = {
                 "atr_stop_distance": atr_stop_distance,
-                "max_single_coin_exposure_pct": str(settings.risk.max_single_coin_exposure_pct),
-                "max_alt_total_exposure_pct": str(settings.risk.max_alt_total_exposure_pct),
+                "max_single_coin_exposure_pct": str(
+                    settings.risk.max_single_coin_exposure_pct
+                ),
+                "max_alt_total_exposure_pct": str(
+                    settings.risk.max_alt_total_exposure_pct
+                ),
             }
 
             current_symbol_position: dict[str, object] | None = None
@@ -1141,7 +1188,9 @@ async def _run_tick(
         use_market_order = False
 
         if pnl_pct <= -abs(risk_limits.stop_loss_pct):
-            close_reason = f"hard_stop_loss: pnl={pnl_pct:.2f}% <= -{risk_limits.stop_loss_pct}%"
+            close_reason = (
+                f"hard_stop_loss: pnl={pnl_pct:.2f}% <= -{risk_limits.stop_loss_pct}%"
+            )
             use_market_order = True
 
         elif pnl_pct <= -abs(risk_limits.soft_stop_loss_pct):
@@ -1323,7 +1372,9 @@ async def _run_tick(
 
         buy_pct = settings.risk.max_position_size_pct
         if advice is not None and advice.buy_pct is not None:
-            buy_pct = max(Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct))
+            buy_pct = max(
+                Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct)
+            )
         order_price = trade_price
         if advice is not None and advice.target_price is not None:
             order_price = advice.target_price
@@ -1343,7 +1394,11 @@ async def _run_tick(
             intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
             intent_price = order_price  # always pass price for proper KRW sizing
             reason_parts = [
-                f"Strategy: {signals[0].metadata.get('reason', 'buy')}" if signals else ""
+                (
+                    f"Strategy: {signals[0].metadata.get('reason', 'buy')}"
+                    if signals
+                    else ""
+                )
             ]
             if advice:
                 reason_parts.append(f"LLM: {advice.reasoning[:100]}")
@@ -1413,7 +1468,11 @@ async def _run_tick(
                 intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
                 intent_price = None if use_market else order_price
                 reason_parts = [
-                    f"Strategy: {signals[0].metadata.get('reason', 'sell')}" if signals else ""
+                    (
+                        f"Strategy: {signals[0].metadata.get('reason', 'sell')}"
+                        if signals
+                        else ""
+                    )
                 ]
                 if advice:
                     reason_parts.append(f"LLM: {advice.reasoning[:100]}")
@@ -1455,7 +1514,9 @@ async def _run_tick(
     elif final_action == "SHORT" and settings.risk.futures_enabled:
         short_pct = settings.risk.max_position_size_pct
         if advice is not None and advice.short_pct is not None:
-            short_pct = max(Decimal("0"), min(advice.short_pct, settings.risk.max_position_size_pct))
+            short_pct = max(
+                Decimal("0"), min(advice.short_pct, settings.risk.max_position_size_pct)
+            )
         order_price = trade_price
         if advice is not None and advice.target_price is not None:
             order_price = advice.target_price
@@ -1465,7 +1526,11 @@ async def _run_tick(
             intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
             intent_price = None if use_market else order_price
             reason_parts = [
-                f"Strategy: {signals[0].metadata.get('reason', 'short')}" if signals else ""
+                (
+                    f"Strategy: {signals[0].metadata.get('reason', 'short')}"
+                    if signals
+                    else ""
+                )
             ]
             if advice:
                 reason_parts.append(f"LLM: {advice.reasoning[:100]}")
@@ -1508,7 +1573,11 @@ async def _run_tick(
 
     elif final_action == "COVER" and settings.risk.futures_enabled:
         for pos in positions:
-            if pos.symbol == symbol and pos.quantity > 0 and pos.side == PositionSide.SHORT:
+            if (
+                pos.symbol == symbol
+                and pos.quantity > 0
+                and pos.side == PositionSide.SHORT
+            ):
                 cover_qty = pos.quantity
                 cover_pct = Decimal("100")
                 if advice is not None and advice.sell_pct is not None:
@@ -1521,7 +1590,11 @@ async def _run_tick(
                 intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
                 intent_price = trade_price  # always pass price for proper sizing
                 reason_parts = [
-                    f"Strategy: {signals[0].metadata.get('reason', 'cover')}" if signals else ""
+                    (
+                        f"Strategy: {signals[0].metadata.get('reason', 'cover')}"
+                        if signals
+                        else ""
+                    )
                 ]
                 if advice:
                     reason_parts.append(f"LLM: {advice.reasoning[:100]}")
@@ -1584,7 +1657,9 @@ async def _main_loop(settings: Settings, once: bool = False) -> None:
     try:
         while True:
             try:
-                cancelled = await engine.cancel_stale_orders(settings.stale_order_timeout_sec)
+                cancelled = await engine.cancel_stale_orders(
+                    settings.stale_order_timeout_sec
+                )
                 for order in cancelled:
                     log_event(
                         "order",
@@ -1627,7 +1702,9 @@ async def _main_loop(settings: Settings, once: bool = False) -> None:
             for symbol in active_symbols:
                 try:
                     await _run_tick(
-                        components, symbol, prefetched_ticker=batched_tickers.get(symbol)
+                        components,
+                        symbol,
+                        prefetched_ticker=batched_tickers.get(symbol),
                     )
                 except Exception as e:
                     logger.error("tick_error", symbol=symbol, error=str(e))
@@ -1672,12 +1749,16 @@ def run(mode: str | None, once: bool) -> None:
     if settings.trading_mode == TradingMode.LIVE:
         if not settings.is_live_mode():
             click.echo("ERROR: LIVE MODE NOT ARMED")
-            click.echo(f"Create {settings.live_mode_token_path} with content 'ARMED' to enable.")
+            click.echo(
+                f"Create {settings.live_mode_token_path} with content 'ARMED' to enable."
+            )
             sys.exit(1)
 
         if not once:
             click.echo("WARNING: You are about to start LIVE trading.")
-            confirmation = click.prompt("Type 'I_UNDERSTAND_LIVE_TRADING' to confirm", type=str)
+            confirmation = click.prompt(
+                "Type 'I_UNDERSTAND_LIVE_TRADING' to confirm", type=str
+            )
             if confirmation != "I_UNDERSTAND_LIVE_TRADING":
                 click.echo("Aborted.")
                 sys.exit(1)
@@ -1720,7 +1801,9 @@ def selftest() -> None:
     # 1. Config loads
     try:
         settings = Settings.load_safe()
-        assert settings.trading_mode == TradingMode.PAPER, "Default mode should be paper"
+        assert (
+            settings.trading_mode == TradingMode.PAPER
+        ), "Default mode should be paper"
         click.echo("  [OK] Config loads (paper mode)")
     except Exception as e:
         errors.append(f"Config: {e}")
@@ -1772,7 +1855,13 @@ def selftest() -> None:
 
     # 6. Models
     try:
-        from coin_trader.core.models import Order, OrderStatus, OrderType, ExchangeName, OrderSide
+        from coin_trader.core.models import (
+            Order,
+            OrderStatus,
+            OrderType,
+            ExchangeName,
+            OrderSide,
+        )
 
         order = Order(
             client_order_id="test_001",

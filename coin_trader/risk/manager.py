@@ -27,8 +27,7 @@ class _RiskDecisionRecordCtor(Protocol):
         reason: str,
         timestamp: datetime,
         metadata: dict[str, object] | None = None,
-    ) -> RiskDecisionRecord:
-        ...
+    ) -> RiskDecisionRecord: ...
 
 
 _risk_record = cast(_RiskDecisionRecordCtor, cast(object, RiskDecisionRecord))
@@ -90,14 +89,15 @@ class RiskManager:
             self._daily_pnl = ZERO
             self._daily_order_count = 0
 
-    async def validate(self, intent: OrderIntent, state: dict[str, object]) -> RiskDecisionRecord:
+    async def validate(
+        self, intent: OrderIntent, state: dict[str, object]
+    ) -> RiskDecisionRecord:
         now = datetime.now(timezone.utc)
         self._reset_daily_if_needed()
-        is_opening = (
-            (intent.side == OrderSide.BUY and not intent.reduce_only)
-            or (intent.side == OrderSide.SELL
-                and intent.position_side == PositionSide.SHORT
-                and not intent.reduce_only)
+        is_opening = (intent.side == OrderSide.BUY and not intent.reduce_only) or (
+            intent.side == OrderSide.SELL
+            and intent.position_side == PositionSide.SHORT
+            and not intent.reduce_only
         )
 
         # 1. Market order policy: must be LIMIT unless explicit exception
@@ -107,11 +107,15 @@ class RiskManager:
             and self.limits.default_order_type == "limit"
         ):
             return self._reject(
-                intent, now, "Market orders not allowed by default policy. Use limit orders."
+                intent,
+                now,
+                "Market orders not allowed by default policy. Use limit orders.",
             )
 
         total_balance = _as_decimal(state.get("total_balance"), ZERO)
-        order_value = intent.quote_quantity or (intent.quantity or ZERO) * (intent.price or ZERO)
+        order_value = intent.quote_quantity or (intent.quantity or ZERO) * (
+            intent.price or ZERO
+        )
         current_positions = _as_int(state.get("position_count"), 0)
 
         # 2. Position sizing and exposure checks (buy only)
@@ -125,9 +129,9 @@ class RiskManager:
                 )
 
             current_symbol_value = _as_decimal(state.get("current_symbol_value"), ZERO)
-            projected_symbol_pct = ((current_symbol_value + order_value) / total_balance) * Decimal(
-                "100"
-            )
+            projected_symbol_pct = (
+                (current_symbol_value + order_value) / total_balance
+            ) * Decimal("100")
             if projected_symbol_pct > self.limits.max_single_coin_exposure_pct:
                 return self._reject(
                     intent,
@@ -149,7 +153,10 @@ class RiskManager:
         # 4. Rate limit check (buy only)
         cutoff = now - timedelta(seconds=1)
         self._order_timestamps = [t for t in self._order_timestamps if t > cutoff]
-        if is_opening and len(self._order_timestamps) >= self.limits.max_orders_per_second:
+        if (
+            is_opening
+            and len(self._order_timestamps) >= self.limits.max_orders_per_second
+        ):
             return self._reject(
                 intent, now, f"Rate limit exceeded: {len(self._order_timestamps)}/s"
             )
@@ -168,13 +175,17 @@ class RiskManager:
         if not self.limits.futures_enabled:
             symbol_lower = intent.symbol.lower()
             if any(kw in symbol_lower for kw in ("perp", "future", "swap")):
-                return self._reject(intent, now, "Futures/derivatives trading is disabled")
+                return self._reject(
+                    intent, now, "Futures/derivatives trading is disabled"
+                )
 
         # 7. Slippage check for limit orders
         if is_opening and intent.order_type == OrderType.LIMIT and intent.price:
             market_price = _as_decimal(state.get("market_price"), ZERO)
             if market_price > 0:
-                slippage_bps = abs(intent.price - market_price) / market_price * Decimal("10000")
+                slippage_bps = (
+                    abs(intent.price - market_price) / market_price * Decimal("10000")
+                )
                 if slippage_bps > Decimal(self.limits.max_slippage_bps):
                     return self._reject(
                         intent,
@@ -184,7 +195,10 @@ class RiskManager:
 
         # 8. Futures-specific checks (only when futures enabled and opening a position)
         if self.limits.futures_enabled and is_opening:
-            leverage = getattr(intent, 'leverage', self.limits.max_leverage) or self.limits.max_leverage
+            leverage = (
+                getattr(intent, "leverage", self.limits.max_leverage)
+                or self.limits.max_leverage
+            )
             if leverage < 1:
                 leverage = 1
 
@@ -194,7 +208,8 @@ class RiskManager:
             # 8b. Max notional per position
             if effective_exposure > self.limits.max_notional_per_position:
                 return self._reject(
-                    intent, now,
+                    intent,
+                    now,
                     f"Notional {effective_exposure:.0f} exceeds per-position limit {self.limits.max_notional_per_position}",
                 )
 
@@ -202,7 +217,8 @@ class RiskManager:
             total_notional = _as_decimal(state.get("total_notional_exposure"), ZERO)
             if total_notional + effective_exposure > self.limits.max_total_notional:
                 return self._reject(
-                    intent, now,
+                    intent,
+                    now,
                     f"Total notional {total_notional + effective_exposure:.0f} exceeds limit {self.limits.max_total_notional}",
                 )
 
@@ -211,7 +227,8 @@ class RiskManager:
             available_margin = _as_decimal(state.get("available_margin"), ZERO)
             if available_margin > 0 and required_margin > available_margin:
                 return self._reject(
-                    intent, now,
+                    intent,
+                    now,
                     f"Insufficient margin: required {required_margin:.0f}, available {available_margin:.0f}",
                 )
 
@@ -219,10 +236,15 @@ class RiskManager:
             liquidation_price = _as_decimal(state.get("liquidation_price"), ZERO)
             market_price = _as_decimal(state.get("market_price"), ZERO)
             if liquidation_price > 0 and market_price > 0:
-                dist_pct = abs(market_price - liquidation_price) / market_price * Decimal("100")
+                dist_pct = (
+                    abs(market_price - liquidation_price)
+                    / market_price
+                    * Decimal("100")
+                )
                 if dist_pct < self.limits.liquidation_warning_threshold_pct:
                     return self._reject(
-                        intent, now,
+                        intent,
+                        now,
                         f"Too close to liquidation: {dist_pct:.1f}% < {self.limits.liquidation_warning_threshold_pct}%",
                     )
 
@@ -230,10 +252,14 @@ class RiskManager:
             funding_bps = _as_int(state.get("funding_rate_bps"), 0)
             if abs(funding_bps) > self.limits.max_funding_rate_bps:
                 # Block opening in the direction that pays funding
-                is_long = intent.side == OrderSide.BUY and intent.position_side != PositionSide.SHORT
+                is_long = (
+                    intent.side == OrderSide.BUY
+                    and intent.position_side != PositionSide.SHORT
+                )
                 if (is_long and funding_bps > 0) or (not is_long and funding_bps < 0):
                     return self._reject(
-                        intent, now,
+                        intent,
+                        now,
                         f"High funding rate {funding_bps}bps against position direction",
                     )
 
@@ -245,10 +271,15 @@ class RiskManager:
             decision=RiskDecision.APPROVED,
             reason="All risk checks passed",
             timestamp=now,
-            metadata={"order_value": str(order_value), "position_count": current_positions},
+            metadata={
+                "order_value": str(order_value),
+                "position_count": current_positions,
+            },
         )
 
-    def _reject(self, intent: OrderIntent, ts: datetime, reason: str) -> RiskDecisionRecord:
+    def _reject(
+        self, intent: OrderIntent, ts: datetime, reason: str
+    ) -> RiskDecisionRecord:
         return _risk_record(
             intent_id=intent.intent_id,
             decision=RiskDecision.REJECTED,

@@ -28,8 +28,7 @@ from coin_trader.core.models import (
 
 
 class _TickerAdapter(Protocol):
-    async def get_ticker(self, symbol: str) -> Mapping[str, object]:
-        ...
+    async def get_ticker(self, symbol: str) -> Mapping[str, object]: ...
 
 
 DEFAULT_INITIAL_BALANCE = Decimal("1000000")
@@ -56,7 +55,9 @@ class PaperBroker:
         self.all_fills: dict[str, list[Fill]] = {}  # client_order_id -> [Fill]
         self._fills_by_order_id: dict[str, list[Fill]] = {}
 
-        self._position_cost_krw: dict[str, Decimal] = {}  # base currency -> KRW cost basis
+        self._position_cost_krw: dict[str, Decimal] = (
+            {}
+        )  # base currency -> KRW cost basis
 
         self.fee_rate: Decimal = Decimal("0.0005")  # 0.05%
         self.slippage_rate: Decimal = Decimal("0.001")  # 0.1% for market orders
@@ -75,7 +76,9 @@ class PaperBroker:
 
         quantity = intent.quantity
         if quantity is None and intent.quote_quantity is not None:
-            ref_price = effective_price if effective_price is not None else current_price
+            ref_price = (
+                effective_price if effective_price is not None else current_price
+            )
             if ref_price <= 0:
                 raise ValueError("Invalid reference price for sizing")
             quantity = intent.quote_quantity / ref_price
@@ -139,7 +142,9 @@ class PaperBroker:
         order.updated_at = now
         return order
 
-    async def _execute_fill(self, order: Order, qty: Decimal, price: Decimal, ts: datetime) -> None:
+    async def _execute_fill(
+        self, order: Order, qty: Decimal, price: Decimal, ts: datetime
+    ) -> None:
         base, quote = order.symbol.split("/")
         fee = qty * price * self.fee_rate
 
@@ -155,7 +160,9 @@ class PaperBroker:
             self.balances[base] = self.balances.get(base, Decimal("0")) + qty
 
             if quote == self._quote_currency:
-                self._position_cost_krw[base] = self._position_cost_krw.get(base, Decimal("0")) + cost
+                self._position_cost_krw[base] = (
+                    self._position_cost_krw.get(base, Decimal("0")) + cost
+                )
 
         else:
             available = self.balances.get(base, Decimal("0"))
@@ -174,7 +181,9 @@ class PaperBroker:
                 if held_qty > 0 and held_cost > 0:
                     reduction = held_cost * (qty / held_qty)
                     new_cost = held_cost - reduction
-                    self._position_cost_krw[base] = new_cost if new_cost > 0 else Decimal("0")
+                    self._position_cost_krw[base] = (
+                        new_cost if new_cost > 0 else Decimal("0")
+                    )
                 if self.balances.get(base, Decimal("0")) <= 0:
                     _ = self._position_cost_krw.pop(base, None)
 
@@ -227,7 +236,9 @@ class PaperBroker:
                 can_fill = current_price >= order.price
 
             if can_fill:
-                await self._execute_fill(order, order.remaining_quantity, order.price, now)
+                await self._execute_fill(
+                    order, order.remaining_quantity, order.price, now
+                )
 
     async def _get_price(self, symbol: str) -> Decimal:
         ticker = await self.adapter.get_ticker(symbol)
@@ -321,6 +332,10 @@ class PaperBroker:
             if not fills:
                 continue
             first = fills[0]
-            if first.order_id == order_id or first.client_order_id == order_id or client_id == order_id:
+            if (
+                first.order_id == order_id
+                or first.client_order_id == order_id
+                or client_id == order_id
+            ):
                 return list(fills)
         return []
