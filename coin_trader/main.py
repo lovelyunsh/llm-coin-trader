@@ -71,8 +71,6 @@ _btc_daily_candles: list[dict[str, object]] = []
 _btc_daily_candles_ts: float = 0.0
 _BTC_DAILY_CANDLE_REFRESH = 3600.0  # refetch daily candles hourly
 _btc_daily_strategy: Any = None
-_symbol_candle_refresh_ts: dict[str, float] = {}
-_base_candle_cache: dict[str, list[dict[str, object]]] = {}
 _dynamic_symbols_cache: list[str] = []
 _dynamic_symbols_cache_ts: float = 0.0
 _previous_universe_selections: list[dict[str, object]] = []
@@ -210,11 +208,17 @@ def _build_system(
         _exchange_ctx = settings.exchange.value
 
         if settings.llm_auth_mode == "oauth":
+            _extra_auth = (
+                [settings.llm_oauth_auth_file_2]
+                if settings.llm_oauth_auth_file_2
+                else None
+            )
             llm_advisor = LLMAdvisor.create_oauth(
                 auth_file=settings.llm_oauth_auth_file,
                 model=settings.llm_oauth_model,
                 open_browser=settings.llm_oauth_open_browser,
                 force_login=settings.llm_oauth_force_login,
+                extra_auth_files=_extra_auth,
             )
             llm_advisor._futures_enabled = _futures
             llm_advisor._exchange_context = _exchange_ctx
@@ -457,41 +461,6 @@ async def _fetch_batch_tickers(
     except Exception:
         return {}
 
-
-def _should_refresh_candles(symbol: str, settings: Settings) -> bool:
-    last = _symbol_candle_refresh_ts.get(symbol)
-    if last is None:
-        return True
-    # Refresh when a new UTC hour starts (= new completed 1h candle available)
-    now_dt = datetime.now(timezone.utc)
-    last_dt = datetime.fromtimestamp(last, tz=timezone.utc)
-    current_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
-    return last_dt < current_hour_start
-
-
-def _build_synthetic_candle(
-    ticker: dict[str, object],
-    last_candle: dict[str, object] | None,
-) -> dict[str, object]:
-    """Build a synthetic in-progress candle from live ticker data.
-
-    Uses the last completed candle's close as open, current ticker price as close.
-    Keeps indicators current without additional API calls.
-    """
-    trade_price = float(str(ticker.get("price", 0)))
-    if last_candle is not None:
-        raw = last_candle.get("close", trade_price)
-        synthetic_open = float(str(raw or trade_price))
-    else:
-        synthetic_open = trade_price
-
-    return {
-        "open": synthetic_open,
-        "high": max(synthetic_open, trade_price),
-        "low": min(synthetic_open, trade_price),
-        "close": trade_price,
-        "volume": 0,
-    }
 
 
 def _compute_universe_candidate_k(final_top_n: int) -> int:
@@ -931,22 +900,14 @@ async def _run_tick(
                 )
             return
 
-    base_candles = _base_candle_cache.get(symbol, [])
-    if not base_candles or _should_refresh_candles(symbol, settings):
-        try:
-            base_candles = await exchange_adapter.get_candles(
-                symbol, interval="1h", count=200
-            )
-            _base_candle_cache[symbol] = base_candles
-            _symbol_candle_refresh_ts[symbol] = time.time()
-        except Exception:
-            pass
+    try:
+        base_candles = await exchange_adapter.get_candles(
+            symbol, interval="1h", count=200
+        )
+    except Exception:
+        base_candles = []
 
-    # Inject synthetic in-progress candle so indicators reflect current price
-    synthetic = _build_synthetic_candle(
-        ticker, base_candles[-1] if base_candles else None
-    )
-    strategy.update_candles(symbol, base_candles + [synthetic])
+    strategy.update_candles(symbol, base_candles)
 
     # 5. Run strategy
     signals = await strategy.on_tick(md)

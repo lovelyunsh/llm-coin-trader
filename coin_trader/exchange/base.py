@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from types import TracebackType
 from typing import Self, TypeAlias, cast
+
+_log = logging.getLogger(__name__)
 
 import httpx
 from tenacity import (
@@ -69,6 +72,12 @@ class BaseExchangeAdapter:
         self._rate_limit_lock = asyncio.Lock()
         self._last_request_time = 0.0
 
+    async def _pre_request_hook(self, url: str) -> None:
+        """Override in subclasses to wait based on rate-limit headers before a request."""
+
+    def _post_response_hook(self, url: str, headers: httpx.Headers) -> None:
+        """Override in subclasses to update rate-limit state from response headers."""
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -92,6 +101,8 @@ class BaseExchangeAdapter:
                 if wait_for > 0:
                     await asyncio.sleep(wait_for)
 
+                await self._pre_request_hook(url)
+
                 response = await self._client.request(
                     method,
                     url,
@@ -112,6 +123,7 @@ class BaseExchangeAdapter:
                 per_endpoint[endpoint_key] = per_endpoint.get(endpoint_key, 0) + 1
                 _API_METRICS["per_endpoint"] = per_endpoint
                 self._last_request_time = asyncio.get_running_loop().time()
+                self._post_response_hook(url, response.headers)
 
                 if response.status_code != 429:
                     response.raise_for_status()
@@ -130,6 +142,12 @@ class BaseExchangeAdapter:
                     except ValueError:
                         retry_wait = 1.0
                 retry_wait = max(retry_wait, 0.5 * (2**attempt))
+                _log.warning(
+                    "exchange_rate_limited_429 url=%s attempt=%d retry_in=%.1fs",
+                    url,
+                    attempt,
+                    retry_wait,
+                )
                 await asyncio.sleep(retry_wait)
 
             if response is None:

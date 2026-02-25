@@ -5,16 +5,26 @@ API docs: https://binance-docs.github.io/apidocs/futures/en/
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import logging
 import time
 from decimal import Decimal
 from typing import TypeAlias, cast
 from urllib.parse import urlencode
 
+import httpx
 from typing_extensions import override
 
 from coin_trader.exchange.base import BaseExchangeAdapter
+
+_log = logging.getLogger(__name__)
+
+# Binance USDT-M futures: 2400 weight/minute limit
+_WEIGHT_LIMIT = 2400
+_WEIGHT_WARN = 2000   # start throttling above this (~83%)
+_WEIGHT_HARD = 2300   # heavy throttle above this (~96%)
 
 BINANCE_FUTURES_PROD_URL: str = "https://fapi.binance.com"
 BINANCE_FUTURES_TESTNET_URL: str = "https://testnet.binancefuture.com"
@@ -139,6 +149,36 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         self._api_key = api_key
         self._api_secret = api_secret
         self._testnet = testnet
+        # (used_weight, monotonic_time_when_read)
+        self._weight_state: tuple[int, float] | None = None
+
+    @override
+    def _post_response_hook(self, url: str, headers: httpx.Headers) -> None:
+        raw = headers.get("x-mbx-used-weight-1m", "")
+        if raw:
+            try:
+                self._weight_state = (int(raw), asyncio.get_running_loop().time())
+            except (ValueError, RuntimeError):
+                pass
+
+    @override
+    async def _pre_request_hook(self, url: str) -> None:
+        if self._weight_state is None:
+            return
+        used, read_at = self._weight_state
+        now = asyncio.get_running_loop().time()
+        elapsed = now - read_at
+        if used >= _WEIGHT_HARD:
+            # Very close to limit: wait until the 1-minute window resets
+            wait = max(0.0, 60.0 - elapsed)
+            if wait > 0.1:
+                _log.warning("binance_weight_hard used=%d/%d wait=%.1fs", used, _WEIGHT_LIMIT, wait)
+                await asyncio.sleep(wait)
+        elif used >= _WEIGHT_WARN:
+            # Proportional throttle: 0s at 2000, up to 5s at 2300
+            wait = (used - _WEIGHT_WARN) / (_WEIGHT_HARD - _WEIGHT_WARN) * 5.0
+            _log.info("binance_weight_warn used=%d/%d wait=%.2fs", used, _WEIGHT_LIMIT, wait)
+            await asyncio.sleep(wait)
 
     # ------------------------------------------------------------------
     # Symbol conversion

@@ -53,7 +53,7 @@ class RiskLimits:
     default_order_type: str = "limit"
     futures_enabled: bool = False
     max_leverage: int = 1
-    max_slippage_bps: int = 100
+    max_slippage_bps: int = 150
     max_single_coin_exposure_pct: Decimal = Decimal("25")
     max_alt_total_exposure_pct: Decimal = Decimal("70")
     atr_stop_multiplier: Decimal = Decimal("1.5")
@@ -96,6 +96,7 @@ class Settings(BaseSettings):
 
     # LLM OAuth (when llm_auth_mode=oauth)
     llm_oauth_auth_file: Path = Field(default=Path("data/.auth/openai-oauth.json"))
+    llm_oauth_auth_file_2: Path | None = Field(default=None)
     llm_oauth_model: str = Field(default="gpt-5.2-codex")
     llm_oauth_open_browser: bool = Field(default=True)
     llm_oauth_force_login: bool = Field(default=False)

@@ -424,6 +424,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         oauth_auth_file: Path | None = None,
         oauth_open_browser: bool = True,
         oauth_force_login: bool = False,
+        oauth_extra_auth_files: list[Path] | None = None,
         futures_enabled: bool = False,
         leverage: int = 1,
         exchange_context: str = "upbit",
@@ -441,6 +442,14 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         self._leverage: int = leverage
         self._exchange_context: str = exchange_context
 
+        # Round-robin auth file pool (primary + extras)
+        self._oauth_auth_files: list[Path] = (
+            [oauth_auth_file] if oauth_auth_file else []
+        )
+        if oauth_extra_auth_files:
+            self._oauth_auth_files.extend(oauth_extra_auth_files)
+        self._oauth_rr_idx: int = 0
+
         self._rate_lock: asyncio.Lock = asyncio.Lock()
         self._last_call_ts: float = 0.0
 
@@ -450,6 +459,14 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             self._base_url = "https://api.anthropic.com/v1"
         else:
             self._base_url = "https://api.openai.com/v1"
+
+    def _next_auth_file(self) -> Path:
+        """Round-robin across available OAuth auth files."""
+        if not self._oauth_auth_files:
+            return Path("data/.auth/openai-oauth.json")
+        idx = self._oauth_rr_idx % len(self._oauth_auth_files)
+        self._oauth_rr_idx += 1
+        return self._oauth_auth_files[idx]
 
     @property
     def system_prompt(self) -> str:
@@ -472,6 +489,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         force_login: bool = False,
         timeout: float = 60.0,
         min_interval_seconds: float = 10.0,
+        extra_auth_files: list[Path] | None = None,
     ) -> "LLMAdvisor":
         return cls(
             api_key="",
@@ -483,6 +501,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             oauth_auth_file=auth_file,
             oauth_open_browser=open_browser,
             oauth_force_login=force_login,
+            oauth_extra_auth_files=extra_auth_files,
         )
 
     async def get_advice(
@@ -694,7 +713,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             logger.error("oauth_import_error error=%s", str(e))
             return None
 
-        auth_file = self._oauth_auth_file or Path("data/.auth/openai-oauth.json")
+        auth_file = self._next_auth_file()
         try:
             auth = await asyncio.to_thread(
                 get_reusable_auth,
@@ -733,7 +752,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             logger.error("oauth_import_error error=%s", str(e))
             return None
 
-        auth_file = self._oauth_auth_file or Path("data/.auth/openai-oauth.json")
+        auth_file = self._next_auth_file()
         try:
             auth = await asyncio.to_thread(
                 get_reusable_auth,
