@@ -168,6 +168,10 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         used, read_at = self._weight_state
         now = asyncio.get_running_loop().time()
         elapsed = now - read_at
+        # Weight window expired — reset stale state
+        if elapsed > 60.0:
+            self._weight_state = None
+            return
         if used >= _WEIGHT_HARD:
             # Very close to limit: wait until the 1-minute window resets
             wait = max(0.0, 60.0 - elapsed)
@@ -419,11 +423,16 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
 
     async def place_order(
         self,
+        *,
         symbol: str,
         side: str,
         order_type: str,
         quantity: Decimal,
         price: Decimal | None = None,
+        reduce_only: bool = False,
+        position_side: str | None = None,
+        stop_price: Decimal | None = None,
+        time_in_force: str | None = None,
     ) -> JsonObject:
         """POST /fapi/v1/order — place a new futures order.
 
@@ -433,6 +442,10 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
             order_type: 'limit' or 'market' (normalized to 'LIMIT'/'MARKET').
             quantity: Order quantity in base asset.
             price: Limit price (required for limit orders).
+            reduce_only: If True, order can only reduce an existing position.
+            position_side: 'LONG' or 'SHORT' for hedge mode.
+            stop_price: Trigger price for stop orders.
+            time_in_force: Time-in-force policy (e.g. 'GTC', 'IOC').
         """
         binance_symbol = self.denormalize_symbol(symbol)
         binance_side = side.upper()
@@ -446,11 +459,39 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         }
         if binance_type == "LIMIT" and price is not None:
             params["price"] = str(price)
-            params["timeInForce"] = "GTC"
+            if time_in_force is not None:
+                params["timeInForce"] = time_in_force
+            else:
+                params["timeInForce"] = "GTC"
+        elif time_in_force is not None:
+            params["timeInForce"] = time_in_force
+
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        if position_side is not None:
+            params["positionSide"] = position_side
+        if stop_price is not None:
+            params["stopPrice"] = str(stop_price)
 
         self._sign(params)
         result = await self._request(
             "POST",
+            "/fapi/v1/order",
+            params=params,
+            headers=self._auth_headers(),
+        )
+        return _as_str_object_dict(result) or {}
+
+    async def get_order(self, order_id: str, symbol: str) -> JsonObject:
+        """GET /fapi/v1/order — query a single order by orderId and symbol."""
+        binance_symbol = self.denormalize_symbol(symbol)
+        params: QueryParams = {
+            "symbol": binance_symbol,
+            "orderId": order_id,
+        }
+        self._sign(params)
+        result = await self._request(
+            "GET",
             "/fapi/v1/order",
             params=params,
             headers=self._auth_headers(),

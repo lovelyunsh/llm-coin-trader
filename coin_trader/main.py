@@ -60,8 +60,11 @@ _MAX_DECISION_HISTORY = 5
 # 심볼별 매수 쿨다운: 동일 코인 반복매수 방지 (RENDER 49분 3회, ETH 43분 5회 문제 해결)
 _last_buy_ts: dict[str, float] = {}
 _BUY_COOLDOWN_SECONDS = 1800.0
-# 최소 주문금액: 수수료(0.05% x 2) 대비 의미없는 소액거래 차단
-_MIN_ORDER_VALUE_KRW = Decimal("5000")
+# 최소 주문금액: 수수료 대비 의미없는 소액거래 차단 (거래소별)
+_MIN_ORDER_VALUE: dict[str, Decimal] = {
+    "KRW": Decimal("5000"),
+    "USDT": Decimal("5"),
+}
 
 _btc_trend_cache: dict[str, object] = {}
 _btc_trend_cache_ts: float = 0.0
@@ -617,7 +620,8 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
         except Exception:
             pass
 
-    always_keep = [s for s in settings.get_always_keep_symbols() if s.endswith("/KRW")]
+    suffix = f"/{settings.quote_currency}"
+    always_keep = [s for s in settings.get_always_keep_symbols() if s.endswith(suffix)]
     forced_symbols: list[str] = []
     for symbol in [*always_keep, *held_symbols]:
         if symbol not in forced_symbols:
@@ -1317,12 +1321,13 @@ async def _run_tick(
             order_price = advice.target_price
         order_value = total_balance * buy_pct / Decimal("100")
 
-        if order_value < _MIN_ORDER_VALUE_KRW:
+        min_order_value = _MIN_ORDER_VALUE.get(settings.quote_currency, Decimal("5"))
+        if order_value < min_order_value:
             logger.info(
                 "buy_below_minimum",
                 symbol=symbol,
                 order_value=str(order_value),
-                minimum=str(_MIN_ORDER_VALUE_KRW),
+                minimum=str(min_order_value),
             )
             return
 
@@ -1397,10 +1402,13 @@ async def _run_tick(
                     sell_qty = pos.quantity * sell_pct / Decimal("100")
                 if sell_qty <= 0:
                     continue
-                # 잔여분이 5000원 미만이면 전량 매도 (업비트 최소 주문금액 미충족 방지)
+                # 잔여분이 최소 주문금액 미만이면 전량 매도 (거래소 최소 주문금액 미충족 방지)
                 remaining_qty = pos.quantity - sell_qty
                 remaining_value = remaining_qty * trade_price
-                if remaining_value < _MIN_ORDER_VALUE_KRW:
+                min_order_value = _MIN_ORDER_VALUE.get(
+                    settings.quote_currency, Decimal("5")
+                )
+                if remaining_value < min_order_value:
                     sell_qty = pos.quantity
 
                 order_price = trade_price

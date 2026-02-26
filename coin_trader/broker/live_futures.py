@@ -95,11 +95,16 @@ class LiveFuturesBroker:
         exchange_adapter: BinanceFuturesAdapter,
         trading_symbols: list[str] | None = None,
         quote_currency: str = "USDT",
+        default_leverage: int = 1,
+        margin_type: str = "isolated",
     ) -> None:
         self.exchange = exchange
         self.adapter = exchange_adapter
         self._quote_currency = quote_currency
+        self._default_leverage = default_leverage
+        self._margin_type = margin_type
         self._trading_symbols: set[str] = set(trading_symbols or [])
+        self._order_symbols: dict[str, str] = {}  # order_id -> symbol
 
         self._snapshot_cache: tuple[float, BalanceSnapshot | None, list[Position]] = (
             0.0,
@@ -282,6 +287,10 @@ class LiveFuturesBroker:
 
             self.invalidate_cache()
 
+            # Track order_id -> symbol for cancel()
+            if order_id is not None:
+                self._order_symbols[str(order_id)] = intent.symbol
+
             return Order(
                 order_id=str(order_id) if order_id is not None else None,
                 client_order_id=client_order_id,
@@ -328,8 +337,21 @@ class LiveFuturesBroker:
             )
 
     async def cancel(self, order_id: str) -> None:
-        # symbol is required by Binance; best-effort with empty string if unknown
-        await self.adapter.cancel_order(order_id, "")
+        # Binance requires symbol for cancel — look up from tracked orders
+        symbol = self._order_symbols.get(order_id, "")
+        if not symbol:
+            # Fallback: search open orders for the symbol
+            try:
+                open_orders = await self.adapter.get_open_orders(None)
+                if isinstance(open_orders, (list, tuple)):
+                    for raw in open_orders:
+                        if isinstance(raw, dict) and str(raw.get("orderId")) == order_id:
+                            sym_raw = str(raw.get("symbol", ""))
+                            symbol = self.adapter.normalize_symbol(sym_raw)
+                            break
+            except Exception:
+                pass
+        await self.adapter.cancel_order(order_id, symbol)
 
     async def fetch_open_orders(self) -> list[Order]:
         now = datetime.now(timezone.utc)

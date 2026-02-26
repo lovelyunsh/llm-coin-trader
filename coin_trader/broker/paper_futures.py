@@ -86,12 +86,14 @@ class PaperFuturesBroker:
         initial_balance_usdt: Decimal = Decimal("10000"),
         default_leverage: int = 1,
         margin_type: str = "isolated",
+        quote_currency: str = "USDT",
     ) -> None:
         self.exchange = exchange
         self.adapter = exchange_adapter
         self._balance_usdt: Decimal = initial_balance_usdt
         self._default_leverage: int = default_leverage
         self._margin_type: str = margin_type
+        self._quote_currency: str = quote_currency  # accepted for interface compat
 
         # symbol -> _FuturesPosition (one per symbol per side in hedge mode)
         self._positions: dict[str, _FuturesPosition] = {}
