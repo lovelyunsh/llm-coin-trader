@@ -61,6 +61,7 @@ data/
 # 환경 변수 (절대 커밋 금지)
 .env
 .env.*
+!.env.example
 .env.local
 .env.*.local
 
