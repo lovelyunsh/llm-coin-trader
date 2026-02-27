@@ -334,9 +334,11 @@ async def get_status() -> JSONResponse:
 async def _trading_loop() -> None:
     global _is_trading
     from coin_trader.main import (
+        _build_surge_context,
         _fetch_batch_tickers,
         _refresh_dynamic_symbols,
         _run_tick,
+        _scan_for_surges,
     )
 
     settings: Settings = _components["settings"]
@@ -388,6 +390,29 @@ async def _trading_loop() -> None:
                     )
                 except Exception:
                     _logger.error("run_tick failed symbol=%s", symbol, exc_info=True)
+
+            # Surge detection
+            try:
+                surge_symbols = await _scan_for_surges(_components)
+                if surge_symbols:
+                    surge_tickers = await _fetch_batch_tickers(
+                        exchange_adapter, surge_symbols
+                    )
+                    for sym in surge_symbols:
+                        if not _is_trading:
+                            break
+                        try:
+                            await _run_tick(
+                                _components,
+                                sym,
+                                prefetched_ticker=surge_tickers.get(sym),
+                                surge_context=_build_surge_context(sym),
+                            )
+                        except Exception:
+                            _logger.error("surge_tick failed symbol=%s", sym, exc_info=True)
+            except Exception:
+                _logger.error("surge_scan failed", exc_info=True)
+
             if _is_trading:
                 await asyncio.sleep(settings.market_data_interval_sec)
     except asyncio.CancelledError:
@@ -623,20 +648,41 @@ async def get_open_orders() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Safety events
+# Surge scans
 # ---------------------------------------------------------------------------
-@app.get("/api/safety-events")
-async def get_safety_events() -> JSONResponse:
-    store: StateStore | None = _components.get("store")
-    if not store:
-        return JSONResponse({"events": []})
+def _read_surge_scan_logs(limit: int = 50) -> list[dict[str, Any]]:
+    import json as _json
 
+    settings: Settings | None = _components.get("settings")
+    log_dir = settings.log_dir if settings else Path("logs")
+    file_path = log_dir / "surge_scans.jsonl"
+    if not file_path.exists():
+        return []
+
+    entries: list[dict[str, Any]] = []
+    try:
+        lines = file_path.read_text(encoding="utf-8").strip().splitlines()
+        for line in lines[-limit:]:
+            try:
+                row = _json.loads(line)
+                if isinstance(row, dict):
+                    entries.append(row)
+            except _json.JSONDecodeError:
+                pass
+    except Exception:
+        return []
+
+    entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return entries[:limit]
+
+
+@app.get("/api/surge-scans")
+async def get_surge_scans() -> JSONResponse:
     async def _load() -> dict[str, Any]:
-        events = store.get_safety_events(limit=50)
-        return {"events": [_model_to_dict(e) for e in events]}
+        return {"scans": _read_surge_scan_logs(limit=50)}
 
     payload = await _cached_api_response(
-        "safety_events",
+        "surge_scans",
         _API_CACHE_TTL_SLOW_SEC,
         _load,
     )

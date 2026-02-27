@@ -44,7 +44,7 @@ class RiskLimits:
     soft_stop_loss_pct: Decimal = Decimal("5")
     stop_loss_pct: Decimal = Decimal("10")
     take_profit_pct: Decimal = Decimal("10")
-    trailing_stop_enabled: bool = True
+    trailing_stop_enabled: bool = False
     trailing_stop_pct: Decimal = Decimal("5")
     circuit_breaker_threshold_pct: Decimal = Decimal("15")
     circuit_breaker_window_min: int = 5
@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     dynamic_symbol_max_abs_change_24h_pct: Decimal = Field(default=Decimal("20"))
     dynamic_symbol_max_intraday_range_pct: Decimal = Field(default=Decimal("30"))
     always_keep_symbols: str = Field(default="")
+
+    # Surge detection
+    surge_detection_enabled: bool = Field(default=True)
+    surge_scan_interval_sec: int = Field(default=180)
+    surge_volume_multiplier: Decimal = Field(default=Decimal("3.0"))
+    surge_min_turnover_delta_krw: int = Field(default=50_000_000)
+    surge_max_candidates: int = Field(default=3)
+    surge_max_buy_pct: Decimal = Field(default=Decimal("10"))
+    surge_history_window: int = Field(default=10)
+    surge_cooldown_sec: int = Field(default=1800)
 
     # Logging
     log_level: str = Field(default="INFO")

@@ -79,6 +79,15 @@ _dynamic_symbols_cache_ts: float = 0.0
 _previous_universe_selections: list[dict[str, object]] = []
 _MAX_UNIVERSE_HISTORY = 3
 
+# Surge detection state
+_surge_candidates: list[str] = []
+_surge_scan_ts: float = 0.0
+_surge_turnover_snapshots: dict[str, Decimal] = {}
+_surge_turnover_history: dict[str, list[Decimal]] = {}
+_surge_cooldowns: dict[str, float] = {}
+_surge_markets_cache: list[str] = []
+_surge_markets_cache_ts: float = 0.0
+
 
 def _build_system(
     settings: Settings, *, install_signal_handlers: bool = False
@@ -819,10 +828,144 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
     return selected
 
 
+async def _scan_for_surges(
+    components: dict[str, Any],
+) -> list[str]:
+    """Scan all KRW markets for volume surges via turnover delta."""
+    global _surge_scan_ts, _surge_turnover_snapshots, _surge_turnover_history
+    global _surge_markets_cache, _surge_markets_cache_ts, _surge_candidates
+
+    settings: Settings = components["settings"]
+    exchange_adapter = components["exchange_adapter"]
+
+    if not settings.surge_detection_enabled:
+        return []
+    if settings.exchange != ExchangeName.UPBIT:
+        return []
+
+    now = time.time()
+    if now - _surge_scan_ts < settings.surge_scan_interval_sec:
+        return _surge_candidates
+
+    _surge_scan_ts = now
+
+    # Refresh full market list every 10 minutes
+    if not _surge_markets_cache or now - _surge_markets_cache_ts > 600:
+        try:
+            _surge_markets_cache = await exchange_adapter.get_tradeable_markets()
+            _surge_markets_cache_ts = now
+        except Exception:
+            if not _surge_markets_cache:
+                return []
+
+    # Fetch tickers in batches (Upbit allows ~100 per call)
+    all_tickers: dict[str, dict[str, object]] = {}
+    batch_size = settings.dynamic_symbol_batch_size or 80
+    for i in range(0, len(_surge_markets_cache), batch_size):
+        batch = _surge_markets_cache[i : i + batch_size]
+        try:
+            batch_result = await exchange_adapter.get_tickers(batch)
+            if batch_result:
+                all_tickers.update(batch_result)
+        except Exception:
+            continue
+
+    # Compute turnover deltas
+    prev_snapshots = dict(_surge_turnover_snapshots)
+    new_snapshots: dict[str, Decimal] = {}
+    candidates: list[tuple[str, float, Decimal]] = []  # (symbol, ratio, delta)
+
+    for sym, ticker in all_tickers.items():
+        turnover = Decimal(str(ticker.get("turnover_24h", 0)))
+        new_snapshots[sym] = turnover
+
+        if sym not in prev_snapshots:
+            continue
+
+        delta = turnover - prev_snapshots[sym]
+        if delta <= 0:
+            # turnover_24h is rolling — can decrease; skip
+            continue
+
+        # Update rolling history
+        history = _surge_turnover_history.setdefault(sym, [])
+        history.append(delta)
+        if len(history) > settings.surge_history_window:
+            _surge_turnover_history[sym] = history[-settings.surge_history_window :]
+            history = _surge_turnover_history[sym]
+
+        # Need at least 4 data points (~12 min) for meaningful baseline
+        if len(history) < 4:
+            continue
+
+        # Average of all history except the latest (baseline)
+        baseline_deltas = history[:-1]
+        avg_delta = sum(baseline_deltas) / len(baseline_deltas)
+        if avg_delta <= 0:
+            continue
+
+        ratio = float(delta / avg_delta)
+        if (
+            ratio >= float(settings.surge_volume_multiplier)
+            and delta >= settings.surge_min_turnover_delta_krw
+        ):
+            # Filter: skip if already in dynamic universe or in cooldown
+            if sym in _dynamic_symbols_cache:
+                continue
+            if now - _surge_cooldowns.get(sym, 0.0) < settings.surge_cooldown_sec:
+                continue
+            candidates.append((sym, ratio, delta))
+
+    _surge_turnover_snapshots = new_snapshots
+
+    # Sort by ratio descending, take top N
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    selected = [c[0] for c in candidates[: settings.surge_max_candidates]]
+
+    log_event(
+        "surge_scan",
+        {
+            "total_markets_scanned": len(all_tickers),
+            "snapshots_with_history": len(
+                [h for h in _surge_turnover_history.values() if len(h) >= 4]
+            ),
+            "raw_candidates": len(candidates),
+            "selected": selected,
+            "details": [
+                {"symbol": c[0], "ratio": round(c[1], 2), "delta_krw": str(c[2])}
+                for c in candidates[: settings.surge_max_candidates]
+            ],
+        },
+    )
+
+    _surge_candidates = selected
+    return selected
+
+
+def _build_surge_context(symbol: str) -> dict[str, object]:
+    """Build volume context dict for a surge-detected symbol."""
+    history = _surge_turnover_history.get(symbol, [])
+    if len(history) < 2:
+        return {"is_surge": True, "surge_volume_ratio": 0.0}
+
+    latest_delta = history[-1]
+    baseline_deltas = history[:-1]
+    avg_delta = sum(baseline_deltas) / len(baseline_deltas) if baseline_deltas else latest_delta
+    ratio = float(latest_delta / avg_delta) if avg_delta > 0 else 0.0
+
+    return {
+        "is_surge": True,
+        "surge_volume_ratio": round(ratio, 2),
+        "surge_delta_krw": str(latest_delta),
+        "surge_baseline_avg_krw": str(int(avg_delta)),
+    }
+
+
 async def _run_tick(
     components: dict[str, Any],
     symbol: str,
     prefetched_ticker: dict[str, object] | None = None,
+    surge_context: dict[str, object] | None = None,
 ) -> None:
     engine: ExecutionEngine = components["engine"]
     strategy = components["strategy"]
@@ -1106,6 +1249,8 @@ async def _run_tick(
             symbol_candles = strategy._candle_history.get(symbol, [])
             recent_structure = _compute_recent_structure(symbol_candles)
             volume_context = _compute_volume_context(symbol_candles)
+            if surge_context:
+                volume_context.update(surge_context)
 
             advice = await llm_advisor.get_advice(
                 symbol,
@@ -1316,6 +1461,9 @@ async def _run_tick(
             buy_pct = max(
                 Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct)
             )
+        # Cap surge buys to surge_max_buy_pct
+        if surge_context and buy_pct > settings.surge_max_buy_pct:
+            buy_pct = settings.surge_max_buy_pct
         order_price = trade_price
         if advice is not None and advice.target_price is not None:
             order_price = advice.target_price
@@ -1358,6 +1506,8 @@ async def _run_tick(
             order = await engine.execute(intent, state)
             if order:
                 _last_buy_ts[symbol] = time.time()  # record buy for cooldown
+                if surge_context:
+                    _surge_cooldowns[symbol] = time.time()
                 log_event(
                     "order",
                     {
@@ -1658,6 +1808,27 @@ async def _main_loop(settings: Settings, once: bool = False) -> None:
                     )
                 except Exception as e:
                     logger.error("tick_error", symbol=symbol, error=str(e))
+
+            # Surge detection: scan for volume spikes and run ticks on candidates
+            try:
+                surge_symbols = await _scan_for_surges(components)
+                if surge_symbols:
+                    surge_tickers = await _fetch_batch_tickers(
+                        exchange_adapter=components["exchange_adapter"],
+                        symbols=surge_symbols,
+                    )
+                    for sym in surge_symbols:
+                        try:
+                            await _run_tick(
+                                components,
+                                sym,
+                                prefetched_ticker=surge_tickers.get(sym),
+                                surge_context=_build_surge_context(sym),
+                            )
+                        except Exception as e:
+                            logger.error("surge_tick_error", symbol=sym, error=str(e))
+            except Exception as e:
+                logger.error("surge_scan_error", error=str(e))
 
             if once:
                 break
