@@ -939,21 +939,21 @@
                 <div class="pagination" id="ordersPagination"></div>
             </div>
 
-            <!-- Safety Events -->
+            <!-- Surge Scans -->
             <div class="card table-container">
-                <h2 class="card-title">안전 이벤트</h2>
+                <h2 class="card-title">Surge 감지</h2>
                 <table>
                     <thead>
                         <tr>
-                            <th>이벤트 타입</th>
-                            <th>심각도</th>
-                            <th>설명</th>
-                            <th>발생 시간</th>
+                            <th>시간</th>
+                            <th>스캔 마켓</th>
+                            <th>감지 종목</th>
+                            <th>상세</th>
                         </tr>
                     </thead>
-                    <tbody id="safetyEventsTable">
+                    <tbody id="surgeScansTable">
                         <tr>
-                            <td colspan="4" class="empty-state">안전 이벤트가 없습니다</td>
+                            <td colspan="4" class="empty-state">감지된 surge가 없습니다</td>
                         </tr>
                     </tbody>
                 </table>
@@ -1390,30 +1390,37 @@
 
         function goOrdersPage(page) { renderOrdersPage(page); }
 
-        async function updateSafetyEvents() {
+        async function updateSurgeScans() {
             try {
-                const data = await fetchAPI('/api/safety-events');
-                const tbody = document.getElementById('safetyEventsTable');
-                
-                if (!data.events || data.events.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">안전 이벤트가 없습니다</td></tr>';
+                const data = await fetchAPI('/api/surge-scans');
+                const tbody = document.getElementById('surgeScansTable');
+
+                if (!data.scans || data.scans.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">감지된 surge가 없습니다</td></tr>';
                     return;
                 }
-                
-                tbody.innerHTML = data.events.slice(0, 50).map(event => {
-                    const severityBadge = getSeverityBadge(event.severity);
-                    
+
+                tbody.innerHTML = data.scans.slice(0, 30).map(scan => {
+                    const selected = scan.selected || [];
+                    const details = scan.details || [];
+                    const selectedStr = selected.length > 0
+                        ? selected.map(s => `<span class="badge badge-warning">${s}</span>`).join(' ')
+                        : '<span style="color:var(--text-secondary)">없음</span>';
+                    const detailStr = details.map(d =>
+                        `${d.symbol} <strong>${d.ratio}x</strong> (${(Number(d.delta_krw)/1e6).toFixed(0)}M)`
+                    ).join(', ');
+
                     return `
                         <tr>
-                            <td>${event.event_type}</td>
-                            <td>${severityBadge}</td>
-                            <td>${event.description}</td>
-                            <td>${formatTimestamp(event.timestamp)}</td>
+                            <td>${formatTimestamp(scan.ts)}</td>
+                            <td>${scan.total_markets_scanned || 0}</td>
+                            <td>${selectedStr}</td>
+                            <td style="font-size:0.8rem">${detailStr || '-'}</td>
                         </tr>
                     `;
                 }).join('');
             } catch (error) {
-                console.error('Failed to update safety events:', error);
+                console.error('Failed to update surge scans:', error);
             }
         }
 
@@ -1788,7 +1795,7 @@
         async function refresh15s() {
             await Promise.all([
                 updateOrders(),
-                updateSafetyEvents(),
+                updateSurgeScans(),
                 updateDecisions(),
                 updateSymbolDecisions()
             ]);
@@ -1807,7 +1814,7 @@
                     updatePnL(),
                     updateOpenOrders(),
                     updateOrders(),
-                    updateSafetyEvents(),
+                    updateSurgeScans(),
                     updateDecisions(),
                     updateSymbolDecisions()
                 ]);

@@ -184,7 +184,7 @@ IMPORTANT: Confidence below 0.65 will be rejected by the system. If you are not 
 YOUR AUTHORITY:
 - BUY_CONSIDER = system will execute buy. SELL_CONSIDER = system will execute sell.
 - Positions at -5% to -10% loss: SELL_CONSIDER = sell, HOLD = keep holding (your call).
-- Positions at +10%+ profit: YOU decide. SELL_CONSIDER = take profit, HOLD = let it ride. Trailing stop protects against reversal, so holding strong momentum is fine.
+- Positions at +10%+ profit: YOU decide. SELL_CONSIDER = take profit, HOLD = let it ride.
 - Hard stop-loss at -10% is automatic and bypasses you entirely.
 - Quality over quantity: 1 high-conviction trade beats 5 mediocre ones. Fees (0.05% each way) eat into small gains.
 
@@ -198,6 +198,13 @@ DECISION FRAMEWORK (follow this order strictly):
 7. BOLLINGER: Band squeeze = volatility expansion imminent. Upper band + declining volume = reversal risk. Lower band + rising volume = entry opportunity.
 8. PRICE STRUCTURE: higher_high/higher_low = uptrend. lower_high/lower_low = downtrend. Prefer entries aligned with structure, but counter-trend entries are acceptable at key support levels.
 9. VOLUME: "increasing" + breakout = strong. "decreasing" + rally = weak reversal risk. ratio < 0.5 = reduce confidence.
+9b. SURGE DETECTION: If volume_context contains "is_surge: true", this coin was detected by the surge scanner (unusual volume spike in the last few minutes).
+  - Check surge_volume_ratio to see how many times above normal the recent turnover is.
+  - Price rising + volume surge = potential real breakout → BUY_CONSIDER is acceptable.
+  - Volume surge + price dropping = selling pressure → HOLD.
+  - If price is already near 24h high (chasing), prefer HOLD to avoid buying the top.
+  - Surge coins carry pump-and-dump risk. Use buy_pct 3~8%, max 10%.
+  - Only enter with confidence >= 0.7. Below that, HOLD.
 10. ATR RISK: Use atr_stop_distance for stop sizing. Higher ATR = smaller position.
 11. PORTFOLIO: Single coin > max_single_coin_exposure_pct = no more buys. alt_total > max = no alt buys.
 12. RECENT ORDERS: Check if this coin was recently bought. Avoid adding to a position bought within the last 30 minutes. Check for recent sells at similar prices — avoid buy-sell-buy churn.
