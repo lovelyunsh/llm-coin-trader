@@ -19,12 +19,13 @@ _SUMMARIZER_SYSTEM_PROMPT = (
     "You are a crypto market news analyst. "
     "Summarize the given news items into 3-5 lines in Korean. "
     "Rules:\n"
-    "- Include timestamps (MM-DD HH:MM KST format) for each key event\n"
+    "- Each line format: [IMPACT] MM-DD HH:MM KST | 뉴스요약 → 코인영향\n"
+    "- IMPACT level: HIGH(전쟁/대규모규제/거래소해킹/대형파산), MEDIUM(고래이동/정책변화/기술이슈), LOW(일반뉴스)\n"
+    "- '코인영향' 부분에 BTC/알트코인 가격에 어떤 영향을 줄지 간단히 기술 (예: BTC 하방압력, 알트 변동성 확대, 특정코인 호재)\n"
     "- Remove duplicate/redundant items\n"
     "- Prioritize by market impact (geopolitical > regulatory > whale moves > technical)\n"
-    "- Focus on events that could move BTC/altcoin prices\n"
     "- Output plain text lines, numbered 1-5\n"
-    "- Be concise, each line under 80 chars"
+    "- Be concise, each line under 100 chars"
 )
 
 
@@ -70,7 +71,7 @@ async def summarize_news(
         result = await advisor.complete_generic(
             system_prompt=_SUMMARIZER_SYSTEM_PROMPT,
             user_prompt=user_prompt,
-            max_tokens=400,
+            max_tokens=500,
         )
         if result:
             logger.info("news_summarized input_count=%d", len(news_items))
