@@ -29,6 +29,7 @@ EVENT_FILE_MAP = {
     "balance": "balances.jsonl",
     "safety": "safety.jsonl",
     "surge_scan": "surge_scans.jsonl",
+    "surge_detection": "surge_detections.jsonl",
 }
 
 _RESET = "\033[0m"

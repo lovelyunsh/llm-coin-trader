@@ -328,7 +328,7 @@ async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> No
         await components["store"].close()
 
 
-async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> None:
+async def test_trailing_stop_triggers_sell_when_price_drops_from_high(tmp_path: Path) -> None:
     components = _make_components(tmp_path)
 
     entry_price = Decimal("50000000")
@@ -339,8 +339,8 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
             return_value={
                 "price": int(current_price),
                 "open": 50000000,
-                "high": 56500000,
-                "low": 50000000,
+                "high": 58500000,
+                "low": 55000000,
                 "volume_24h": 200.0,
                 "bid": 55900000,
                 "ask": 56100000,
@@ -352,6 +352,14 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
         get_candles=AsyncMock(return_value=[]),
     )
 
+    # Enable trailing stop with 3% threshold
+    settings: Settings = components["settings"]
+    settings.risk = dataclasses.replace(
+        settings.risk,
+        trailing_stop_enabled=True,
+        trailing_stop_pct=Decimal("3"),
+    )
+
     winning_position = Position(
         exchange=ExchangeName.UPBIT,
         symbol="BTC/KRW",
@@ -361,6 +369,10 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
         timestamp=datetime.now(timezone.utc),
     )
     components["broker"].fetch_positions = AsyncMock(return_value=[winning_position])
+
+    # Set high watermark so drop from high triggers trailing stop
+    # high=58M, current=56M → drop = (58-56)/58 = 3.45% > 3%
+    _main_mod._high_watermarks["BTC/KRW"] = Decimal("58000000")
 
     execute_calls: list[object] = []
 
@@ -384,10 +396,11 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
             if e[0] == "decision" and e[1].get("trigger") == "position_protection"
         ]
         assert len(protection_events) == 1
-        assert "take_profit" in str(protection_events[0][1].get("reason", ""))
+        assert "trailing_stop" in str(protection_events[0][1].get("reason", ""))
 
         assert len(execute_calls) == 1
     finally:
+        _main_mod._high_watermarks.pop("BTC/KRW", None)
         await components["store"].close()
 
 
@@ -471,12 +484,10 @@ def _make_settings(
     *,
     llm_trading_enabled: bool = True,
     llm_min_confidence: float = 0.7,
-    llm_solo_min_confidence: float = 0.8,
 ) -> Settings:
     settings = Settings.load_safe()
     settings.llm_trading_enabled = llm_trading_enabled
     settings.llm_min_confidence = llm_min_confidence
-    settings.llm_solo_min_confidence = llm_solo_min_confidence
     return settings
 
 

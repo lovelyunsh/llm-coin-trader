@@ -1488,6 +1488,22 @@ async def _run_tick(
             },
         )
 
+    if surge_context:
+        log_event(
+            "surge_detection",
+            {
+                "symbol": symbol,
+                "surge_volume_ratio": surge_context.get("surge_volume_ratio"),
+                "surge_delta_krw": surge_context.get("surge_delta_krw"),
+                "surge_baseline_avg_krw": surge_context.get("surge_baseline_avg_krw"),
+                "final_action": final_action,
+                "llm_action": advice.action if advice else "none",
+                "llm_confidence": str(advice.confidence) if advice else "0",
+                "llm_reasoning": advice.reasoning if advice else "",
+                "price": str(trade_price),
+            },
+        )
+
     if advice is not None:
         hist = _recent_decisions.setdefault(symbol, [])
         hist.append(
@@ -1565,6 +1581,10 @@ async def _run_tick(
                 _last_buy_ts[symbol] = time.time()  # record buy for cooldown
                 if surge_context:
                     _surge_cooldowns[symbol] = time.time()
+                    if symbol not in _dynamic_symbols_cache:
+                        _dynamic_symbols_cache.append(symbol)
+                        settings.trading_symbols = list(_dynamic_symbols_cache)
+                        logger.info("surge_symbol_added_to_universe", symbol=symbol)
                 log_event(
                     "order",
                     {
