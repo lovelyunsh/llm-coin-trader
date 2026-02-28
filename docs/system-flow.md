@@ -54,7 +54,7 @@ LIVE 모드 요청
 _build_system(settings)
 │
 ├── 로깅 초기화 (structlog JSON / JSONL 파일 분리)
-├── StateStore 생성 (SQLite WAL 모드)
+├── StateStore 생성 (PostgreSQL, asyncpg 커넥션 풀)
 ├── KillSwitch 생성 (파일 + SIGTERM/SIGINT 핸들러)
 ├── RiskManager 생성 (불변 RiskLimits 주입)
 ├── AnomalyMonitor 생성 (가격/API/잔고 감시)
@@ -470,7 +470,7 @@ LLM은 **주도적 의사결정자**입니다. LLM의 action이 실제 매매를
 ## 7. 데이터 영속화
 
 ```
-StateStore (SQLite, WAL 모드)
+StateStore (PostgreSQL, asyncpg)
 │
 ├── events            # 전체 이벤트 append-only 감사 로그
 ├── order_intents     # 주문 의도
@@ -578,7 +578,7 @@ coin_trader/
 │   ├── oauth_openai.py         # OAuth PKCE 인증
 │   └── codex_client.py         # ChatGPT Codex SSE 클라이언트
 ├── state/
-│   └── store.py                # SQLite WAL 상태 저장소
+│   └── store.py                # PostgreSQL (asyncpg) 상태 저장소
 ├── security/
 │   └── key_manager.py          # API 키 Fernet 암호화
 ├── logging/

@@ -53,10 +53,6 @@ logs/
 # Data (거래 데이터, DB)
 data/
 *.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
 
 # 환경 변수 (절대 커밋 금지)
 .env

@@ -52,7 +52,7 @@ coin_trader/
 │   ├── advisory.py             # LLM 주도 의사결정 (한국어 출력, 프롬프트 저장)
 │   ├── oauth_openai.py         # OAuth PKCE 인증
 │   └── codex_client.py         # ChatGPT Codex SSE 클라이언트
-├── state/store.py              # SQLite WAL
+├── state/store.py              # PostgreSQL (asyncpg)
 ├── security/key_manager.py     # Fernet 암호화
 ├── logging/
 │   ├── logger.py               # structlog + JSONL 타입별 분리 + HOLD 압축
@@ -379,7 +379,7 @@ DYNAMIC_SYMBOL_MIN_TURNOVER_24H=10000000
 | **일일 손실한도** | 초과 시 거래 중단 |
 | **주문 빈도 제한** | BUY에만 적용, SELL은 항상 통과 |
 | **이상징후 감지** | API 연속 실패, 잔고 불일치, 가격 이상 감지 |
-| **감사 로그** | 모든 이벤트 SQLite에 영구 기록 |
+| **감사 로그** | 모든 이벤트 PostgreSQL에 영구 기록 |
 | **민감정보 마스킹** | API 키, JWT 토큰 등 로그에서 자동 마스킹 |
 | **웹 인증 보안** | 브루트포스 잠금, CSRF 토큰, Secure 쿠키, 서버측 세션 만료 |
 | **선물 리스크 체크** | 레버리지 마진 확인, 노셔널 한도, 청산가 근접도, 펀딩비 체크 |
