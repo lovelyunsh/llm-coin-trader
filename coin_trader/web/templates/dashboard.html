@@ -939,24 +939,28 @@
                 <div class="pagination" id="ordersPagination"></div>
             </div>
 
-            <!-- Surge Scans -->
+            <!-- Surge Detections (per-symbol) -->
             <div class="card table-container">
                 <h2 class="card-title">Surge 감지</h2>
                 <table>
                     <thead>
                         <tr>
                             <th>시간</th>
-                            <th>스캔 마켓</th>
-                            <th>감지 종목</th>
-                            <th>상세</th>
+                            <th>심볼</th>
+                            <th>거래대금 급증</th>
+                            <th>비율</th>
+                            <th>최종결정</th>
+                            <th>LLM 사유</th>
+                            <th>가격</th>
                         </tr>
                     </thead>
-                    <tbody id="surgeScansTable">
+                    <tbody id="surgeDetectionsTable">
                         <tr>
-                            <td colspan="4" class="empty-state">감지된 surge가 없습니다</td>
+                            <td colspan="7" class="empty-state">감지된 surge가 없습니다</td>
                         </tr>
                     </tbody>
                 </table>
+                <div class="pagination" id="surgeDetectionsPagination"></div>
             </div>
 
             <div class="card table-container">
@@ -1027,6 +1031,8 @@
         let _decisionsData = [];
         let _symbolDecisionsPage = 0;
         let _symbolDecisionsData = [];
+        let _surgeDetectionsPage = 0;
+        let _surgeDetectionsData = [];
 
         function renderPagination(containerId, currentPage, totalItems, onPageChange) {
             const container = document.getElementById(containerId);
@@ -1390,39 +1396,61 @@
 
         function goOrdersPage(page) { renderOrdersPage(page); }
 
-        async function updateSurgeScans() {
+        async function updateSurgeDetections() {
             try {
-                const data = await fetchAPI('/api/surge-scans');
-                const tbody = document.getElementById('surgeScansTable');
-
-                if (!data.scans || data.scans.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">감지된 surge가 없습니다</td></tr>';
-                    return;
-                }
-
-                tbody.innerHTML = data.scans.slice(0, 30).map(scan => {
-                    const selected = scan.selected || [];
-                    const details = scan.details || [];
-                    const selectedStr = selected.length > 0
-                        ? selected.map(s => `<span class="badge badge-warning">${s}</span>`).join(' ')
-                        : '<span style="color:var(--text-secondary)">없음</span>';
-                    const detailStr = details.map(d =>
-                        `${d.symbol} <strong>${d.ratio}x</strong> (${(Number(d.delta_krw)/1e6).toFixed(0)}M)`
-                    ).join(', ');
-
-                    return `
-                        <tr>
-                            <td>${formatTimestamp(scan.ts)}</td>
-                            <td>${scan.total_markets_scanned || 0}</td>
-                            <td>${selectedStr}</td>
-                            <td style="font-size:0.8rem">${detailStr || '-'}</td>
-                        </tr>
-                    `;
-                }).join('');
+                const data = await fetchAPI('/api/surge-detections');
+                _surgeDetectionsData = data.surge_detections || [];
+                renderSurgeDetectionsPage(_surgeDetectionsPage);
             } catch (error) {
-                console.error('Failed to update surge scans:', error);
+                console.error('Failed to update surge detections:', error);
             }
         }
+
+        function renderSurgeDetectionsPage(page) {
+            const tbody = document.getElementById('surgeDetectionsTable');
+            if (_surgeDetectionsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">감지된 surge가 없습니다</td></tr>';
+                document.getElementById('surgeDetectionsPagination').innerHTML = '';
+                return;
+            }
+
+            const totalPages = Math.ceil(_surgeDetectionsData.length / PAGE_SIZE);
+            if (page >= totalPages) page = totalPages - 1;
+            if (page < 0) page = 0;
+            _surgeDetectionsPage = page;
+
+            const slice = _surgeDetectionsData.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+            tbody.innerHTML = slice.map(row => {
+                const deltaKrw = row.surge_delta_krw ? (Number(row.surge_delta_krw) / 1e6).toFixed(1) + 'M' : '-';
+                const baselineKrw = row.surge_baseline_avg_krw ? (Number(row.surge_baseline_avg_krw) / 1e6).toFixed(1) + 'M' : '-';
+                const ratio = row.surge_volume_ratio ? row.surge_volume_ratio + 'x' : '-';
+                const action = row.final_action || '-';
+                const actionClass = action === 'BUY' ? 'badge-success' : action === 'SELL' ? 'badge-danger' : 'badge-warning';
+                const reasoning = row.llm_reasoning || '-';
+                const reasoningShort = reasoning.length > 48 ? reasoning.substring(0, 48) + '...' : reasoning;
+                const reasoningEscaped = reasoning.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+                const hasReasoning = reasoning && reasoning !== '-';
+                const llmAction = row.llm_action || '-';
+
+                return `
+                    <tr>
+                        <td>${formatTimestamp(row.ts)}</td>
+                        <td><span class="badge badge-warning">${row.symbol || '-'}</span></td>
+                        <td style="font-size:0.85rem">${deltaKrw} / avg ${baselineKrw}</td>
+                        <td><strong>${ratio}</strong></td>
+                        <td><span class="badge ${actionClass}">${action}</span></td>
+                        <td>
+                            <span class="${hasReasoning ? 'reasoning-cell' : ''}" ${hasReasoning ? `onclick="showReasoning('${row.symbol || "SURGE"}', '${llmAction}', '${row.llm_confidence || "0"}', '${formatTimestamp(row.ts)}', this)" data-reasoning="${reasoningEscaped}"` : ''}>${reasoningShort}</span>
+                        </td>
+                        <td>${formatNumber(row.price)}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            renderPagination('surgeDetectionsPagination', page, _surgeDetectionsData.length, 'goSurgeDetectionsPage');
+        }
+
+        function goSurgeDetectionsPage(page) { renderSurgeDetectionsPage(page); }
 
         function updateDecisionFilters() {
             const filtersContainer = document.getElementById('decisionFilters');
@@ -1795,7 +1823,7 @@
         async function refresh15s() {
             await Promise.all([
                 updateOrders(),
-                updateSurgeScans(),
+                updateSurgeDetections(),
                 updateDecisions(),
                 updateSymbolDecisions()
             ]);
@@ -1814,7 +1842,7 @@
                     updatePnL(),
                     updateOpenOrders(),
                     updateOrders(),
-                    updateSurgeScans(),
+                    updateSurgeDetections(),
                     updateDecisions(),
                     updateSymbolDecisions()
                 ]);

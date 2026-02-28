@@ -697,6 +697,48 @@ async def get_surge_scans() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Surge detections (per-symbol LLM decisions for surge-detected symbols)
+# ---------------------------------------------------------------------------
+def _read_surge_detection_logs(limit: int = 300) -> list[dict[str, Any]]:
+    import json as _json
+
+    settings: Settings | None = _components.get("settings")
+    log_dir = settings.log_dir if settings else Path("logs")
+    file_path = log_dir / "surge_detections.jsonl"
+    if not file_path.exists():
+        return []
+
+    entries: list[dict[str, Any]] = []
+    try:
+        lines = file_path.read_text(encoding="utf-8").strip().splitlines()
+        for line in lines[-limit:]:
+            try:
+                row = _json.loads(line)
+                if isinstance(row, dict):
+                    entries.append(row)
+            except _json.JSONDecodeError:
+                pass
+    except Exception:
+        return []
+
+    entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return entries[:limit]
+
+
+@app.get("/api/surge-detections")
+async def get_surge_detections() -> JSONResponse:
+    async def _load() -> dict[str, Any]:
+        return {"surge_detections": _read_surge_detection_logs(limit=300)}
+
+    payload = await _cached_api_response(
+        "surge_detections",
+        _API_CACHE_TTL_SLOW_SEC,
+        _load,
+    )
+    return JSONResponse(payload)
+
+
+# ---------------------------------------------------------------------------
 # Decisions
 # ---------------------------------------------------------------------------
 def _read_decision_logs(
