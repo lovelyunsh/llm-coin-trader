@@ -193,7 +193,11 @@ DECISION FRAMEWORK (follow this order strictly):
 1. DATA CHECK: Verify data consistency. Flag suspicious P&L or prices in risk_notes.
 2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
 3. BTC CONTEXT (daily): BTC trend data is INFORMATIONAL ONLY. It provides market sentiment context but must NEVER block an altcoin trade. BTC below EMA200 or RSI < 40 = note it in risk_notes and consider slightly smaller buy_pct, but proceed with the trade if the altcoin's own indicators are strong. Each coin is evaluated on its own merit.
-3b. NEWS CONTEXT: If Market News Summary is present, factor geopolitical/regulatory events into your decision. Military conflicts, exchange hacks, regulatory bans = reduce confidence or HOLD. Positive regulation, institutional adoption = may increase confidence. News is supplementary — never override strong technical signals based on news alone, but use it to adjust position sizing and risk_notes.
+3b. NEWS CONTEXT: If Market News Summary is present, check [IMPACT] labels and crypto impact notes.
+  - [HIGH] events: MUST mention in risk_notes and adjust confidence by ±0.05~0.15. War/hack/major regulation = lower confidence for BUY, raise for defensive HOLD.
+  - [MEDIUM] events: Note in risk_notes if relevant to this coin. Minor confidence adjustment (±0.05).
+  - [LOW] events: Acknowledge only if directly related to this specific coin.
+  - News complements technicals — a strong technical setup with [HIGH] negative news = proceed but reduce buy_pct. Weak technicals + [HIGH] negative news = HOLD.
 4. POSITION CHECK: null = new entry evaluation. If held = evaluate from indicators and P&L data. Do NOT add to already heavy positions.
 5. ADX TREND: ADX < 20 = ranging, reduce confidence. ADX > 25 = trend valid. Check +DI vs -DI for direction.
 6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought, < 30 = potential entry.
@@ -295,7 +299,11 @@ DECISION FRAMEWORK (follow this order strictly):
 1. DATA CHECK: Verify data consistency. Flag suspicious P&L, mark price vs entry, or funding rate anomalies in risk_notes.
 2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
 3. BTC CONTEXT (daily): BTC trend data is INFORMATIONAL ONLY. It provides market sentiment context but must NEVER block a trade. BTC below EMA200 or RSI < 40 = note it in risk_notes and consider slightly smaller position size, but proceed with the trade if the coin's own indicators are strong. Each coin is evaluated on its own merit. Strong downtrend may favor shorts.
-3b. NEWS CONTEXT: If Market News Summary is present, factor geopolitical/regulatory events into your decision. Military conflicts, exchange hacks, regulatory bans = reduce confidence or HOLD. Positive regulation, institutional adoption = may increase confidence. News is supplementary — never override strong technical signals based on news alone, but use it to adjust position sizing and risk_notes.
+3b. NEWS CONTEXT: If Market News Summary is present, check [IMPACT] labels and crypto impact notes.
+  - [HIGH] events: MUST mention in risk_notes and adjust confidence by ±0.05~0.15. War/hack/major regulation = lower confidence for BUY, raise for defensive HOLD.
+  - [MEDIUM] events: Note in risk_notes if relevant to this coin. Minor confidence adjustment (±0.05).
+  - [LOW] events: Acknowledge only if directly related to this specific coin.
+  - News complements technicals — a strong technical setup with [HIGH] negative news = proceed but reduce buy_pct. Weak technicals + [HIGH] negative news = HOLD.
 4. POSITION CHECK: null = new entry evaluation. If held = evaluate from indicators and P&L data. Do NOT add to already heavy positions.
 5. ADX TREND: ADX < 20 = ranging, reduce confidence. ADX > 25 = trend valid. Check +DI vs -DI for direction.
 6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought (short opportunity), < 30 = potential long entry.
@@ -1021,6 +1029,8 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             parts.append(f"\nCurrent Position:\n{_c(current_symbol_position)}")
         else:
             parts.append("\nCurrent Position: null (no position held)")
+        if news_context:
+            parts.append(f"\nMarket News Summary:\n{news_context}")
         if technical_indicators:
             parts.append(f"\nTechnical Indicators:\n{_c(technical_indicators)}")
         if recent_structure:
@@ -1029,8 +1039,6 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             parts.append(f"\nVolume:\n{_c(volume_context)}")
         if btc_trend:
             parts.append(f"\nBTC Trend:\n{_c(btc_trend)}")
-        if news_context:
-            parts.append(f"\nMarket News Summary:\n{news_context}")
         if portfolio_exposure:
             parts.append(f"\nPortfolio Exposure:\n{_c(portfolio_exposure)}")
         if risk_context:
