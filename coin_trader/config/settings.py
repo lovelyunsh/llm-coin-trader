@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     dynamic_symbol_max_intraday_range_pct: Decimal = Field(default=Decimal("30"))
     always_keep_symbols: str = Field(default="")
 
+    # News (Coinness Telegram)
+    news_enabled: bool = Field(default=True)
+    news_fetch_interval_sec: int = Field(default=3600)
+    news_summary_count: int = Field(default=50)
+
     # Surge detection
     surge_detection_enabled: bool = Field(default=True)
     surge_scan_interval_sec: int = Field(default=180)

@@ -1,17 +1,13 @@
 """Coin Trader - Safety-first automated crypto trading system.
 
-CLI entrypoint and main trading loop.
+Web dashboard entrypoint and trading tick logic.
 Usage:
-    trader run [--mode paper|live] [--once]
-    trader kill [--close-positions]
-    trader selftest
-    trader encrypt-keys --exchange upbit --master-key <key>
+    trader --host 0.0.0.0 --port 8932
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -30,12 +26,10 @@ from coin_trader.core.models import (
     OrderType,
     PositionSide,
     SignalType,
-    TradingMode,
 )
 from coin_trader.execution.engine import ExecutionEngine
 from coin_trader.execution.idempotency import IdempotencyManager
 from coin_trader.logging.logger import (
-    close_logging,
     get_logger,
     log_event,
     setup_logging,
@@ -87,6 +81,10 @@ _surge_turnover_history: dict[str, list[Decimal]] = {}
 _surge_cooldowns: dict[str, float] = {}
 _surge_markets_cache: list[str] = []
 _surge_markets_cache_ts: float = 0.0
+
+# News (Coinness Telegram)
+_news_fetch_ts: float = 0.0
+_news_summary_cache: str | None = None
 
 
 def _build_system(
@@ -828,6 +826,48 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
     return selected
 
 
+async def _refresh_news(components: dict[str, Any]) -> None:
+    """Fetch Coinness news, summarize if new items found."""
+    global _news_fetch_ts, _news_summary_cache
+
+    settings: Settings = components["settings"]
+    if not settings.news_enabled:
+        return
+
+    now = time.time()
+    if now - _news_fetch_ts < settings.news_fetch_interval_sec:
+        return
+    _news_fetch_ts = now
+
+    store: StateStore = components["store"]
+    llm_advisor = components.get("llm_advisor")
+
+    from coin_trader.news.coinness import fetch_news
+
+    items = await fetch_news()
+    if not items:
+        return
+
+    new_count = store.save_news(items)
+    logger.info("news_fetched", total=len(items), new=new_count)
+
+    if new_count > 0 and llm_advisor is not None:
+        recent = store.get_recent_news(limit=settings.news_summary_count)
+        if recent:
+            from coin_trader.news.summarizer import summarize_news
+
+            summary = await summarize_news(llm_advisor, recent)
+            if summary:
+                store.save_news_summary(summary, len(recent))
+                _news_summary_cache = summary
+                logger.info("news_summary_updated", news_count=len(recent))
+    elif _news_summary_cache is None:
+        # On first run, load existing summary from DB
+        cached = store.get_latest_news_summary()
+        if cached:
+            _news_summary_cache = cached
+
+
 async def _scan_for_surges(
     components: dict[str, Any],
 ) -> list[str]:
@@ -1036,16 +1076,28 @@ async def _run_tick(
     if prev_close > 0:
         price_change_pct = abs(trade_price - prev_close) / prev_close * Decimal("100")
         if risk_manager.check_circuit_breaker(price_change_pct):
-            logger.warning(
-                "circuit_breaker", symbol=symbol, change_pct=f"{price_change_pct:.1f}%"
+            # Bypass circuit breaker if we hold a position in this symbol
+            held_positions = await broker.fetch_positions()
+            has_position = any(
+                p.symbol == symbol and p.quantity > 0 for p in held_positions
             )
-            if notifier:
-                await notifier.send_alert(
-                    "Circuit Breaker",
-                    f"{symbol} price changed {price_change_pct:.1f}%",
-                    "critical",
+            if not has_position:
+                logger.warning(
+                    "circuit_breaker", symbol=symbol, change_pct=f"{price_change_pct:.1f}%"
                 )
-            return
+                if notifier:
+                    await notifier.send_alert(
+                        "Circuit Breaker",
+                        f"{symbol} price changed {price_change_pct:.1f}%",
+                        "critical",
+                    )
+                return
+            logger.info(
+                "circuit_breaker_bypassed",
+                symbol=symbol,
+                change_pct=f"{price_change_pct:.1f}%",
+                reason="holding position",
+            )
 
     try:
         base_candles = await exchange_adapter.get_candles(
@@ -1268,6 +1320,7 @@ async def _run_tick(
                 current_symbol_position=current_symbol_position,
                 recent_structure=recent_structure,
                 volume_context=volume_context,
+                news_context=_news_summary_cache,
             )
             _last_llm_prices[symbol] = trade_price
             _last_llm_times[symbol] = time.time()
@@ -1738,283 +1791,11 @@ async def _run_tick(
                 _low_watermarks.pop(symbol, None)
 
 
-async def _main_loop(settings: Settings, once: bool = False) -> None:
-    """Main trading loop."""
-    components = _build_system(settings, install_signal_handlers=True)
-    store: StateStore = components["store"]
-    engine: ExecutionEngine = components["engine"]
-    broker = components["broker"]
-    notifier = components.get("notifier")
-
-    logger.info(
-        "trader_started",
-        mode=settings.trading_mode.value,
-        exchange=settings.exchange.value,
-        symbols=settings.trading_symbols,
-        live=settings.is_live_mode(),
-    )
-
-    try:
-        while True:
-            try:
-                cancelled = await engine.cancel_stale_orders(
-                    settings.stale_order_timeout_sec
-                )
-                for order in cancelled:
-                    log_event(
-                        "order",
-                        {
-                            "order_id": order.order_id,
-                            "symbol": order.symbol,
-                            "side": order.side.value,
-                            "status": "cancelled",
-                            "trigger": "stale_order_timeout",
-                            "quantity": str(order.quantity),
-                            "price": str(order.price),
-                        },
-                    )
-                    if notifier:
-                        await notifier.send_alert(
-                            "Stale Order Cancelled",
-                            f"{order.symbol} {order.side.value} order cancelled (timeout)",
-                            "medium",
-                        )
-            except Exception as e:
-                logger.error("stale_order_cleanup_error", error=str(e))
-
-            # Sync order statuses (submitted -> filled/cancelled) from exchange
-            try:
-                open_orders = store.get_open_orders()
-                if open_orders and hasattr(broker, "sync_order_statuses"):
-                    updated = await broker.sync_order_statuses(open_orders)
-                    for order in updated:
-                        store.save_order(order)
-                    if updated:
-                        logger.info("order_status_synced", count=len(updated))
-            except Exception as e:
-                logger.error("order_sync_error", error=str(e))
-
-            active_symbols = await _refresh_dynamic_symbols(components)
-            batched_tickers = await _fetch_batch_tickers(
-                exchange_adapter=components["exchange_adapter"], symbols=active_symbols
-            )
-
-            for symbol in active_symbols:
-                try:
-                    await _run_tick(
-                        components,
-                        symbol,
-                        prefetched_ticker=batched_tickers.get(symbol),
-                    )
-                except Exception as e:
-                    logger.error("tick_error", symbol=symbol, error=str(e))
-
-            # Surge detection: scan for volume spikes and run ticks on candidates
-            try:
-                surge_symbols = await _scan_for_surges(components)
-                if surge_symbols:
-                    surge_tickers = await _fetch_batch_tickers(
-                        exchange_adapter=components["exchange_adapter"],
-                        symbols=surge_symbols,
-                    )
-                    for sym in surge_symbols:
-                        try:
-                            await _run_tick(
-                                components,
-                                sym,
-                                prefetched_ticker=surge_tickers.get(sym),
-                                surge_context=_build_surge_context(sym),
-                            )
-                        except Exception as e:
-                            logger.error("surge_tick_error", symbol=sym, error=str(e))
-            except Exception as e:
-                logger.error("surge_scan_error", error=str(e))
-
-            if once:
-                break
-
-            await asyncio.sleep(settings.market_data_interval_sec)
-
-    except KeyboardInterrupt:
-        logger.info("trader_stopped", reason="keyboard_interrupt")
-    finally:
-        adapter = components.get("exchange_adapter")
-        if adapter and hasattr(adapter, "close"):
-            await adapter.close()
-        llm = components.get("llm_advisor")
-        if llm and hasattr(llm, "close"):
-            await llm.close()
-        notifier = components.get("notifier")
-        if notifier and hasattr(notifier, "close"):
-            await notifier.close()
-        store.close()
-        close_logging()
-
-
-@click.group()
-def cli() -> None:
-    """Coin Trader - Safety-first automated crypto trading system."""
-    pass
-
-
-@cli.command()
-@click.option("--mode", type=click.Choice(["paper", "live"]), default=None)
-@click.option("--once", is_flag=True, help="Run a single tick and exit")
-def run(mode: str | None, once: bool) -> None:
-    """Start the trading bot."""
-    settings = Settings.load_safe()
-
-    if mode is not None:
-        settings.trading_mode = TradingMode(mode)
-
-    if settings.trading_mode == TradingMode.LIVE:
-        if not settings.is_live_mode():
-            click.echo("ERROR: LIVE MODE NOT ARMED")
-            click.echo(
-                f"Create {settings.live_mode_token_path} with content 'ARMED' to enable."
-            )
-            sys.exit(1)
-
-        if not once:
-            click.echo("WARNING: You are about to start LIVE trading.")
-            confirmation = click.prompt(
-                "Type 'I_UNDERSTAND_LIVE_TRADING' to confirm", type=str
-            )
-            if confirmation != "I_UNDERSTAND_LIVE_TRADING":
-                click.echo("Aborted.")
-                sys.exit(1)
-
-    click.echo(f"Starting trader in {settings.trading_mode.value} mode...")
-    asyncio.run(_main_loop(settings, once=once))
-
-
-@cli.command()
-@click.option("--close-positions", is_flag=True, help="Also close all open positions")
-def kill(close_positions: bool) -> None:
-    """Activate kill switch - halt all trading."""
-    settings = Settings.load_safe()
-    kill_switch = KillSwitch(settings.kill_switch_file)
-
-    kill_switch.activate("Manual kill via CLI")
-    click.echo("Kill switch ACTIVATED. All new orders blocked.")
-
-    if close_positions:
-        click.echo("Cancelling open orders...")
-
-        async def _cancel() -> None:
-            components = _build_system(settings)
-            engine: ExecutionEngine = components["engine"]
-            cancelled = await engine.cancel_all_open_orders()
-            click.echo(f"Cancelled {cancelled} orders.")
-            components["store"].close()
-
-        asyncio.run(_cancel())
-
-    click.echo("Done. To resume, delete the kill switch file or restart.")
-
-
-@cli.command()
-def selftest() -> None:
-    """Run basic self-test to verify system integrity."""
-    click.echo("Running self-test...")
-    errors: list[str] = []
-
-    # 1. Config loads
-    try:
-        settings = Settings.load_safe()
-        assert (
-            settings.trading_mode == TradingMode.PAPER
-        ), "Default mode should be paper"
-        click.echo("  [OK] Config loads (paper mode)")
-    except Exception as e:
-        errors.append(f"Config: {e}")
-
-    # 2. State store
-    try:
-        store = StateStore(db_path=Path("/tmp/coin_trader_selftest.db"))
-        store.close()
-        Path("/tmp/coin_trader_selftest.db").unlink(missing_ok=True)
-        click.echo("  [OK] State store initializes")
-    except Exception as e:
-        errors.append(f"StateStore: {e}")
-
-    # 3. Risk limits immutable
-    try:
-        limits = RiskLimits()
-        try:
-            limits.max_positions = 999  # type: ignore[misc]
-            errors.append("RiskLimits: should be immutable (frozen dataclass)")
-        except AttributeError:
-            click.echo("  [OK] Risk limits immutable")
-    except Exception as e:
-        errors.append(f"RiskLimits: {e}")
-
-    # 4. Kill switch
-    try:
-        ks_path = Path("/tmp/coin_trader_selftest_ks")
-        ks = KillSwitch(ks_path)
-        assert not ks.is_active()
-        ks.activate("test")
-        assert ks.is_active()
-        ks.deactivate()
-        assert not ks.is_active()
-        ks_path.unlink(missing_ok=True)
-        click.echo("  [OK] Kill switch works")
-    except Exception as e:
-        errors.append(f"KillSwitch: {e}")
-
-    # 5. Redaction
-    try:
-        from coin_trader.logging.redaction import redact_dict
-
-        test = {"api_key": "secret123", "name": "test"}
-        redacted = redact_dict(test)
-        assert "secret123" not in str(redacted), "API key not redacted"
-        click.echo("  [OK] Sensitive data redaction")
-    except Exception as e:
-        errors.append(f"Redaction: {e}")
-
-    # 6. Models
-    try:
-        from coin_trader.core.models import (
-            Order,
-            OrderStatus,
-            OrderType,
-            ExchangeName,
-            OrderSide,
-        )
-
-        order = Order(
-            client_order_id="test_001",
-            intent_id=uuid4(),
-            exchange=ExchangeName.UPBIT,
-            symbol="BTC/KRW",
-            side=OrderSide.BUY,
-            order_type=OrderType.LIMIT,
-            quantity=Decimal("0.001"),
-            price=Decimal("50000000"),
-            status=OrderStatus.PENDING,
-        )
-        assert order.remaining_quantity == Decimal("0.001")
-        click.echo("  [OK] Domain models validate")
-    except Exception as e:
-        errors.append(f"Models: {e}")
-
-    if errors:
-        click.echo(f"\nFAILED - {len(errors)} error(s):")
-        for err in errors:
-            click.echo(f"  - {err}")
-        sys.exit(1)
-    else:
-        click.echo("\nOK - All self-tests passed.")
-        sys.exit(0)
-
-
-@cli.command()
+@click.command()
 @click.option("--host", default="0.0.0.0", help="Bind host")
 @click.option("--port", default=8000, type=int, help="Bind port")
-def web(host: str, port: int) -> None:
-    """Start the web dashboard server."""
+def main(host: str, port: int) -> None:
+    """Coin Trader - Web dashboard with trading."""
     import uvicorn
 
     click.echo(f"Starting web dashboard at http://{host}:{port}")
@@ -2029,25 +1810,5 @@ def web(host: str, port: int) -> None:
     )
 
 
-@cli.command("encrypt-keys")
-@click.option("--exchange", type=click.Choice(["upbit", "binance"]), required=True)
-@click.option("--master-key", prompt=True, hide_input=True, confirmation_prompt=True)
-def encrypt_keys(exchange: str, master_key: str) -> None:
-    """Encrypt API keys for secure storage."""
-    from coin_trader.security.key_manager import KeyManager
-
-    api_key = click.prompt("API Key", hide_input=True)
-    api_secret = click.prompt("API Secret", hide_input=True)
-
-    settings = Settings.load_safe()
-    if exchange == "upbit":
-        key_file = settings.upbit_key_file
-    else:
-        key_file = settings.binance_key_file
-
-    KeyManager.encrypt_keys(api_key, api_secret, key_file, master_key)
-    click.echo(f"Keys encrypted and saved to {key_file}")
-
-
 if __name__ == "__main__":
-    cli()
+    main()

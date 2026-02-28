@@ -13,4 +13,4 @@ RUN poetry install --only main --no-interaction --no-ansi
 
 EXPOSE 8932
 
-CMD ["python", "-m", "coin_trader.main", "web", "--host", "0.0.0.0", "--port", "8932"]
+CMD ["python", "-m", "coin_trader.main", "--host", "0.0.0.0", "--port", "8932"]

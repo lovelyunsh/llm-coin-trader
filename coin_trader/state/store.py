@@ -195,7 +195,33 @@ class StateStore:
             )
             """)
 
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT UNIQUE,
+                content TEXT NOT NULL,
+                published_at TEXT,
+                fetched_at TEXT NOT NULL,
+                source TEXT DEFAULT 'coinness_telegram'
+            )
+            """)
+
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS news_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                summary TEXT NOT NULL,
+                news_count INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """)
+
         # Indexes
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_news_published_at ON news(published_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_news_summaries_created ON news_summaries(created_at DESC)"
+        )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)"
         )
@@ -554,6 +580,56 @@ class StateStore:
                 continue
             snapshots.append(BalanceSnapshotModel.model_validate_json(data))
         return snapshots
+
+    def save_news(self, items: list[Any]) -> int:
+        """Save news items. Returns count of newly inserted rows."""
+        now = _now_iso()
+        inserted = 0
+        with self._conn:
+            for item in items:
+                msg_id = _to_text(_get_attr(item, "message_id"))
+                content = _to_text(_get_attr(item, "content"))
+                published_at = _to_text(_get_attr(item, "published_at"))
+                if not msg_id or not content:
+                    continue
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO news (message_id, content, published_at, fetched_at) VALUES (?, ?, ?, ?)",
+                    (msg_id, content, published_at, now),
+                )
+                inserted += cur.rowcount
+        return inserted
+
+    def get_recent_news(self, limit: int = 50) -> list[dict[str, str]]:
+        """Get recent news items, newest first."""
+        rows = self._conn.execute(
+            "SELECT message_id, content, published_at FROM news ORDER BY published_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "message_id": row["message_id"],
+                "content": row["content"],
+                "published_at": row["published_at"] or "",
+            }
+            for row in rows
+        ]
+
+    def save_news_summary(self, summary: str, news_count: int) -> None:
+        """Save a news summary."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO news_summaries (summary, news_count, created_at) VALUES (?, ?, ?)",
+                (summary, news_count, _now_iso()),
+            )
+
+    def get_latest_news_summary(self) -> str | None:
+        """Get the most recent news summary."""
+        row = self._conn.execute(
+            "SELECT summary FROM news_summaries ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["summary"])
 
     def close(self) -> None:
         if self._closed:
