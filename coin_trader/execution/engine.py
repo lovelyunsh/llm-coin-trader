@@ -27,9 +27,9 @@ class _RiskManager(Protocol):
 
 
 class _StateStore(Protocol):
-    def save_decision(self, decision: object) -> None: ...
+    async def save_decision(self, decision: object) -> None: ...
 
-    def save_order(self, order: Order) -> None: ...
+    async def save_order(self, order: Order) -> None: ...
 
 
 class _KillSwitch(Protocol):
@@ -71,11 +71,11 @@ class ExecutionEngine:
             return None
 
         client_order_id = self.idempotency.generate_key(intent.intent_id)
-        if self.idempotency.is_duplicate(client_order_id):
+        if await self.idempotency.is_duplicate(client_order_id):
             return None
 
         decision = await self.risk.validate(intent, state)
-        self.store.save_decision(decision)
+        await self.store.save_decision(decision)
 
         if getattr(decision, "decision", None) == RiskDecision.REJECTED:
             logger.info(
@@ -88,7 +88,7 @@ class ExecutionEngine:
 
         try:
             order = await self.broker.place(intent, client_order_id)
-            self.store.save_order(order)
+            await self.store.save_order(order)
             self.idempotency.mark_processed(client_order_id)
 
             logger.info(

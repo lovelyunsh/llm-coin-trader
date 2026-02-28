@@ -6,16 +6,8 @@ from typing import Protocol
 from uuid import UUID
 
 
-class _Cursor(Protocol):
-    def fetchone(self) -> object | None: ...
-
-
-class _Conn(Protocol):
-    def execute(self, sql: str, params: tuple[object, ...]) -> _Cursor: ...
-
-
 class _Store(Protocol):
-    conn: _Conn
+    async def order_exists(self, client_order_id: str) -> bool: ...
 
 
 class IdempotencyManager:
@@ -28,17 +20,13 @@ class IdempotencyManager:
     def generate_key(self, intent_id: UUID) -> str:
         return f"intent_{intent_id}"
 
-    def is_duplicate(self, client_order_id: str) -> bool:
+    async def is_duplicate(self, client_order_id: str) -> bool:
         if client_order_id in self._processed:
             return True
 
         if self.store is not None:
             try:
-                cursor = self.store.conn.execute(
-                    "SELECT 1 FROM orders WHERE client_order_id = ? LIMIT 1",
-                    (client_order_id,),
-                )
-                if cursor.fetchone() is not None:
+                if await self.store.order_exists(client_order_id):
                     return True
             except Exception:
                 pass

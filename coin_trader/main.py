@@ -87,11 +87,15 @@ _news_fetch_ts: float = 0.0
 _news_summary_cache: str | None = None
 
 
-def _build_system(
+async def _build_system(
     settings: Settings, *, install_signal_handlers: bool = False
 ) -> dict[str, Any]:
     setup_logging(log_dir=settings.log_dir, log_level=settings.log_level)
-    store = StateStore(db_path=settings.db_path)
+    store = await StateStore.create(
+        settings.database_url,
+        min_size=settings.database_pool_min,
+        max_size=settings.database_pool_max,
+    )
     kill_switch = KillSwitch(
         settings.kill_switch_file, install_signal_handlers=install_signal_handlers
     )
@@ -848,22 +852,22 @@ async def _refresh_news(components: dict[str, Any]) -> None:
     if not items:
         return
 
-    new_count = store.save_news(items)
+    new_count = await store.save_news(items)
     logger.info("news_fetched", total=len(items), new=new_count)
 
     if new_count > 0 and llm_advisor is not None:
-        recent = store.get_recent_news(limit=settings.news_summary_count)
+        recent = await store.get_recent_news(limit=settings.news_summary_count)
         if recent:
             from coin_trader.news.summarizer import summarize_news
 
             summary = await summarize_news(llm_advisor, recent)
             if summary:
-                store.save_news_summary(summary, len(recent))
+                await store.save_news_summary(summary, len(recent))
                 _news_summary_cache = summary
                 logger.info("news_summary_updated", news_count=len(recent))
     elif _news_summary_cache is None:
         # On first run, load existing summary from DB
-        cached = store.get_latest_news_summary()
+        cached = await store.get_latest_news_summary()
         if cached:
             _news_summary_cache = cached
 
@@ -1035,7 +1039,7 @@ async def _run_tick(
             event = anomaly_monitor.record_api_failure()
             if event:
                 logger.error("api_failure_threshold", symbol=symbol, error=str(e))
-                store.save_safety_event(event)
+                await store.save_safety_event(event)
                 kill_switch.activate(f"API failure threshold reached: {e}")
                 if notifier:
                     await notifier.send_alert(
@@ -1067,7 +1071,7 @@ async def _run_tick(
 
     price_event = anomaly_monitor.check_price_anomaly(md)
     if price_event:
-        store.save_safety_event(price_event)
+        await store.save_safety_event(price_event)
         logger.warning("price_anomaly", symbol=symbol, desc=price_event.description)
         if notifier:
             await notifier.send_alert("Price Anomaly", price_event.description, "high")
@@ -1114,7 +1118,7 @@ async def _run_tick(
     # 6. Build state for risk checks
     balances = await broker.fetch_balances()
     positions = await broker.fetch_positions()
-    store.save_balance_snapshot(balances)
+    await store.save_balance_snapshot(balances)
 
     total_balance = (
         balances.total_value_quote or balances.total_value_krw or Decimal("0")
@@ -1230,7 +1234,7 @@ async def _run_tick(
             }
 
             recent_orders_data = []
-            for o in store.get_all_orders(limit=settings.llm_recent_orders_count):
+            for o in await store.get_all_orders(limit=settings.llm_recent_orders_count):
                 ago_sec = (now - o.created_at).total_seconds() if o.created_at else 0
                 if ago_sec < 3600:
                     ago_str = f"{int(ago_sec // 60)}min ago"
