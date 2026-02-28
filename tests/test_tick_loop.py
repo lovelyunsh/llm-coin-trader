@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 from unittest.mock import AsyncMock, Mock, patch
 
+from unittest.mock import AsyncMock as _AM
+
 from coin_trader.config.settings import Settings
 from coin_trader.core.models import BalanceSnapshot, ExchangeName, Position
 from coin_trader.llm.advisory import LLMAdvice
-from coin_trader.state.store import StateStore
 
 
 @dataclass(slots=True)
@@ -74,7 +75,7 @@ class _Components(TypedDict):
     anomaly_monitor: _AnomalyMonitor
     risk_manager: _RiskManager
     kill_switch: _DummyKillSwitch
-    store: StateStore
+    store: object
     settings: Settings
     notifier: object | None
     llm_advisor: NotRequired[_LLMAdvisorStub | None]
@@ -86,9 +87,28 @@ _run_tick = cast(_RunTick, getattr(_main_mod, "_run_tick"))
 _resolve_action = getattr(_main_mod, "_resolve_action")
 
 
+def _make_mock_store() -> Mock:
+    """Create a mock store with async methods matching StateStore interface."""
+    store = Mock()
+    store.save_safety_event = _AM(return_value=None)
+    store.save_balance_snapshot = _AM(return_value=None)
+    store.save_order = _AM(return_value=None)
+    store.save_decision = _AM(return_value=None)
+    store.get_all_orders = _AM(return_value=[])
+    store.get_open_orders = _AM(return_value=[])
+    store.get_positions = _AM(return_value=[])
+    store.save_news = _AM(return_value=0)
+    store.get_recent_news = _AM(return_value=[])
+    store.save_news_summary = _AM(return_value=None)
+    store.get_latest_news_summary = _AM(return_value=None)
+    store.order_exists = _AM(return_value=False)
+    store.close = _AM(return_value=None)
+    return store
+
+
 def _make_components(tmp_path: Path) -> _Components:
     settings = Settings.load_safe()
-    store = StateStore(db_path=tmp_path / "state.sqlite3")
+    store = _make_mock_store()
 
     exchange_adapter = _ExchangeAdapter(
         get_ticker=AsyncMock(
@@ -209,7 +229,7 @@ async def test_run_tick_with_llm_advisor_calls_get_advice_and_logs_no_order(tmp_
     finally:
         _main_mod._last_llm_prices.pop("BTC/KRW", None)
         _main_mod._last_llm_times.pop("BTC/KRW", None)
-        components["store"].close()
+        await components["store"].close()
 
 
 async def test_run_tick_without_llm_advisor_no_error(tmp_path: Path) -> None:
@@ -242,7 +262,7 @@ async def test_run_tick_without_llm_advisor_no_error(tmp_path: Path) -> None:
         if decision_events:
             assert decision_events[0][1].get("final_action") == "HOLD"
     finally:
-        components["store"].close()
+        await components["store"].close()
 
 
 async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> None:
@@ -305,7 +325,7 @@ async def test_stop_loss_triggers_sell_when_position_loses(tmp_path: Path) -> No
 
         assert len(execute_calls) == 1
     finally:
-        components["store"].close()
+        await components["store"].close()
 
 
 async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> None:
@@ -368,7 +388,7 @@ async def test_take_profit_triggers_sell_when_position_gains(tmp_path: Path) -> 
 
         assert len(execute_calls) == 1
     finally:
-        components["store"].close()
+        await components["store"].close()
 
 
 async def test_no_protection_trigger_within_safe_range(tmp_path: Path) -> None:
@@ -430,7 +450,7 @@ async def test_no_protection_trigger_within_safe_range(tmp_path: Path) -> None:
 
         assert len(execute_calls) == 0
     finally:
-        components["store"].close()
+        await components["store"].close()
 
 
 def _make_signal(signal_type: str, confidence: str = "0.7") -> object:

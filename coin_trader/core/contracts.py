@@ -143,27 +143,27 @@ class IExchangeAdapter(ABC):
 
 class IStateStore(ABC):
     @abstractmethod
-    def save_order(self, order: Order) -> None:
+    async def save_order(self, order: Order) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def save_fill(self, fill: Fill) -> None:
+    async def save_fill(self, fill: Fill) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def save_decision(self, decision: RiskDecisionRecord) -> None:
+    async def save_decision(self, decision: RiskDecisionRecord) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def save_safety_event(self, event: SafetyEvent) -> None:
+    async def save_safety_event(self, event: SafetyEvent) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def get_open_orders(self) -> list[Order]:
+    async def get_open_orders(self) -> list[Order]:
         raise NotImplementedError
 
     @abstractmethod
-    def get_positions(self) -> list[Position]:
+    async def get_positions(self) -> list[Position]:
         raise NotImplementedError
 
 

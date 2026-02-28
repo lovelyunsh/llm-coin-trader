@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     from coin_trader.main import _build_system
     import coin_trader.logging.logger as _logger_mod
 
-    _components.update(_build_system(settings))
+    _components.update(await _build_system(settings))
     _started_at = time.time()
 
     if settings.is_live_mode():
@@ -136,7 +136,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             pass
     store = _components.get("store")
     if store:
-        store.close()
+        await store.close()
 
 
 app = FastAPI(title="Coin Trader Dashboard", lifespan=lifespan)
@@ -366,11 +366,11 @@ async def _trading_loop() -> None:
                 store: StateStore | None = _components.get("store")
                 broker = _components.get("broker")
                 if store and broker and hasattr(broker, "sync_order_statuses"):
-                    open_orders = store.get_open_orders()
+                    open_orders = await store.get_open_orders()
                     if open_orders:
                         updated = await broker.sync_order_statuses(open_orders)
                         for order in updated:
-                            store.save_order(order)
+                            await store.save_order(order)
             except Exception:
                 _logger.warning("order_sync failed", exc_info=True)
 
@@ -463,7 +463,7 @@ async def start_trading(request: Request) -> JSONResponse:
     from coin_trader.main import _build_system
     import coin_trader.logging.logger as _logger_mod
 
-    _components.update(_build_system(settings))
+    _components.update(await _build_system(settings))
     _logger_mod.set_trading_mode(mode)
     _invalidate_api_cache()
 
@@ -621,7 +621,7 @@ async def get_orders() -> JSONResponse:
         return JSONResponse({"orders": []})
 
     async def _load() -> dict[str, Any]:
-        orders = store.get_all_orders(limit=100)
+        orders = await store.get_all_orders(limit=100)
         return {"orders": [_model_to_dict(o) for o in orders]}
 
     payload = await _cached_api_response(

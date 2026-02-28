@@ -1,13 +1,39 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: coin-trader-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: trader
+      POSTGRES_DB: coin_trader
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d coin_trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   coin-trader:
     build: .
     container_name: coin-trader
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8932:8932"
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://trader:trader@postgres:5432/coin_trader
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./RUN:/app/RUN
+
+volumes:
+  pgdata:

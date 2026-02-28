@@ -111,7 +111,9 @@ class Settings(BaseSettings):
     stale_order_timeout_sec: int = Field(default=300)
 
     # Data
-    db_path: Path = Field(default=Path("data/coin_trader.db"))
+    database_url: str = Field(default="postgresql://trader:trader@localhost:5432/coin_trader")
+    database_pool_min: int = Field(default=2)
+    database_pool_max: int = Field(default=10)
     market_data_interval_sec: int = Field(default=120)
     candle_refresh_interval_sec: int = Field(default=3600)
 
@@ -223,7 +225,7 @@ class Settings(BaseSettings):
                 trading_symbols=["BTC/KRW"],
                 quote_currency="KRW",
                 btc_reference_symbol="BTC/KRW",
-                db_path=Path("data/coin_trader.db"),
+                database_url="postgresql://trader:trader@localhost:5432/coin_trader",
                 log_level="INFO",
                 log_dir=Path("logs"),
                 kill_switch_file=Path("RUN/kill_switch"),

@@ -20,6 +20,7 @@ click = "^8.1.0"
 fastapi = "^0.115.0"
 uvicorn = {version = "^0.34.0", extras = ["standard"]}
 jinja2 = "^3.1.0"
+asyncpg = "^0.30.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
