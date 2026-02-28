@@ -337,6 +337,7 @@ async def _trading_loop() -> None:
         _build_surge_context,
         _fetch_batch_tickers,
         _refresh_dynamic_symbols,
+        _refresh_news,
         _run_tick,
         _scan_for_surges,
     )
@@ -412,6 +413,12 @@ async def _trading_loop() -> None:
                             _logger.error("surge_tick failed symbol=%s", sym, exc_info=True)
             except Exception:
                 _logger.error("surge_scan failed", exc_info=True)
+
+            # News refresh
+            try:
+                await _refresh_news(_components)
+            except Exception:
+                _logger.error("news_refresh failed", exc_info=True)
 
             if _is_trading:
                 await asyncio.sleep(settings.market_data_interval_sec)

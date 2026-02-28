@@ -86,9 +86,9 @@ _build_system(settings)
 ## 2. 메인 트레이딩 루프
 
 ```
-_main_loop(settings)
+web/api.py: _trading_loop()
 │
-└── while True:
+└── while _is_trading:
     ├── 동적 심볼 유니버스 갱신(기본 1시간)
     ├── 활성 심볼 배치 ticker 조회
     ├── for symbol in active_symbols:
@@ -548,7 +548,7 @@ FastAPI + Jinja2 (포트 8932)
 
 ```
 coin_trader/
-├── main.py                     # 메인 루프, _run_tick, _resolve_action, LLM 연동
+├── main.py                     # 엔트리포인트(웹서버), _build_system, _run_tick, _resolve_action
 ├── config/settings.py          # 설정 (pydantic-settings)
 ├── core/
 │   ├── contracts.py            # 인터페이스 정의

@@ -24,7 +24,7 @@ LLM이 주도하는 암호화폐 자동거래 시스템입니다. 모의투자�
 
 ```
 coin_trader/
-├── main.py                     # 메인 루프, _run_tick, _resolve_action, LLM 연동
+├── main.py                     # 엔트리포인트(웹서버), _build_system, _run_tick, _resolve_action
 ├── config/settings.py          # 설정 (pydantic-settings)
 ├── core/
 │   ├── contracts.py
@@ -227,10 +227,7 @@ docker run -d --name coin-trader-binance \
 
 1. https://www.binance.com/en/my/settings/api-management 에서 API 키 발급
 2. USDT-M 선물 거래 권한 활성화 (출금 비활성화 권장)
-3. API 키 암호화:
-```bash
-docker exec -it coin-trader-binance python -m coin_trader.main encrypt-keys --exchange binance
-```
+3. API 키는 환경 변수(`BINANCE_MASTER_KEY`)로 복호화 키를 전달하고, `data/binance_keys.enc`에 Fernet 암호화되어 저장됩니다.
 
 ### 테스트넷부터 시작
 

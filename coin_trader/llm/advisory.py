@@ -159,6 +159,7 @@ INPUT DATA:
 - Current position: quantity, entry price, unrealized P&L, weight (null = no position)
 - Price structure: higher_high, higher_low, lower_high, lower_low, range_market
 - Volume: volume_vs_avg_ratio, volume_trend
+- Market news summary (optional): recent crypto/macro news from Coinness, pre-summarized. Use for geopolitical risk, regulatory changes, whale moves.
 - Portfolio exposure, risk context, positions, balance, recent orders/candles
 - Current KST time (Korean Standard Time)
 - NOTE: The last candle in Recent Candles is the current in-progress 1h candle (real-time data from exchange). Its volume is partial (accumulated so far this hour).
@@ -192,6 +193,7 @@ DECISION FRAMEWORK (follow this order strictly):
 1. DATA CHECK: Verify data consistency. Flag suspicious P&L or prices in risk_notes.
 2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
 3. BTC CONTEXT (daily): BTC trend data is INFORMATIONAL ONLY. It provides market sentiment context but must NEVER block an altcoin trade. BTC below EMA200 or RSI < 40 = note it in risk_notes and consider slightly smaller buy_pct, but proceed with the trade if the altcoin's own indicators are strong. Each coin is evaluated on its own merit.
+3b. NEWS CONTEXT: If Market News Summary is present, factor geopolitical/regulatory events into your decision. Military conflicts, exchange hacks, regulatory bans = reduce confidence or HOLD. Positive regulation, institutional adoption = may increase confidence. News is supplementary — never override strong technical signals based on news alone, but use it to adjust position sizing and risk_notes.
 4. POSITION CHECK: null = new entry evaluation. If held = evaluate from indicators and P&L data. Do NOT add to already heavy positions.
 5. ADX TREND: ADX < 20 = ranging, reduce confidence. ADX > 25 = trend valid. Check +DI vs -DI for direction.
 6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought, < 30 = potential entry.
@@ -255,6 +257,7 @@ INPUT DATA:
 - Current position: quantity, entry price, unrealized P&L, weight, position_side (long/short), leverage, liquidation price (null = no position)
 - Price structure: higher_high, higher_low, lower_high, lower_low, range_market
 - Volume: volume_vs_avg_ratio, volume_trend
+- Market news summary (optional): recent crypto/macro news from Coinness, pre-summarized. Use for geopolitical risk, regulatory changes, whale moves.
 - Portfolio exposure, risk context, positions, balance, recent orders/candles
 - Current KST time (Korean Standard Time)
 - NOTE: The last candle in Recent Candles is the current in-progress 1h candle (real-time data from exchange). Its volume is partial (accumulated so far this hour).
@@ -292,6 +295,7 @@ DECISION FRAMEWORK (follow this order strictly):
 1. DATA CHECK: Verify data consistency. Flag suspicious P&L, mark price vs entry, or funding rate anomalies in risk_notes.
 2. TIMEFRAME: Indicators are based on the timeframe in market data. Interpret accordingly.
 3. BTC CONTEXT (daily): BTC trend data is INFORMATIONAL ONLY. It provides market sentiment context but must NEVER block a trade. BTC below EMA200 or RSI < 40 = note it in risk_notes and consider slightly smaller position size, but proceed with the trade if the coin's own indicators are strong. Each coin is evaluated on its own merit. Strong downtrend may favor shorts.
+3b. NEWS CONTEXT: If Market News Summary is present, factor geopolitical/regulatory events into your decision. Military conflicts, exchange hacks, regulatory bans = reduce confidence or HOLD. Positive regulation, institutional adoption = may increase confidence. News is supplementary — never override strong technical signals based on news alone, but use it to adjust position sizing and risk_notes.
 4. POSITION CHECK: null = new entry evaluation. If held = evaluate from indicators and P&L data. Do NOT add to already heavy positions.
 5. ADX TREND: ADX < 20 = ranging, reduce confidence. ADX > 25 = trend valid. Check +DI vs -DI for direction.
 6. MACD + RSI: Histogram increasing = momentum accelerating. MACD > Signal = bullish. RSI > 70 = overbought (short opportunity), < 30 = potential long entry.
@@ -529,6 +533,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         current_symbol_position: dict[str, object] | None = None,
         recent_structure: dict[str, object] | None = None,
         volume_context: dict[str, object] | None = None,
+        news_context: str | None = None,
     ) -> LLMAdvice | None:
         if self._auth_mode == "api_key" and not self._api_key:
             return None
@@ -549,6 +554,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             current_symbol_position=current_symbol_position,
             recent_structure=recent_structure,
             volume_context=volume_context,
+            news_context=news_context,
         )
 
         try:
@@ -751,6 +757,140 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             timeout=self._timeout,
         )
 
+    async def complete_generic(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 500,
+    ) -> str | None:
+        """Generic LLM completion with custom system prompt.
+
+        Reuses the configured auth (API key or OAuth) without
+        the trading-specific system prompt.
+        """
+        if self._auth_mode == "api_key" and not self._api_key:
+            return None
+
+        try:
+            async with self._rate_lock:
+                now = time.time()
+                delay = self._min_interval - (now - self._last_call_ts)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                if self._auth_mode == "oauth":
+                    response = await self._call_oauth_generic(
+                        system_prompt, user_prompt, max_tokens
+                    )
+                elif self._provider == "anthropic":
+                    response = await self._call_anthropic_generic(
+                        system_prompt, user_prompt, max_tokens
+                    )
+                else:
+                    response = await self._call_openai_generic(
+                        system_prompt, user_prompt, max_tokens
+                    )
+                self._last_call_ts = time.time()
+
+            return response
+        except Exception as e:
+            logger.error("llm_generic_error error=%s", str(e))
+            return None
+
+    async def _call_openai_generic(
+        self, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str | None:
+        body = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        data = await self._post_json(
+            f"{self._base_url}/chat/completions", body, headers
+        )
+        if data is None:
+            return None
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        msg = choices[0].get("message", {})
+        content = msg.get("content")
+        return str(content) if content is not None else None
+
+    async def _call_anthropic_generic(
+        self, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str | None:
+        headers = {
+            "x-api-key": self._api_key,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+        body = {
+            "model": self._model,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+        }
+        data = await self._post_json(f"{self._base_url}/messages", body, headers)
+        if data is None:
+            return None
+        content_obj = data.get("content")
+        if not isinstance(content_obj, list) or not content_obj:
+            return None
+        item0 = content_obj[0]
+        if not isinstance(item0, dict):
+            return None
+        text = item0.get("text")
+        return str(text) if text is not None else None
+
+    async def _call_oauth_generic(
+        self, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str | None:
+        try:
+            from coin_trader.llm.oauth_openai import get_reusable_auth, normalize_model
+            from coin_trader.llm.codex_client import query_codex
+        except ImportError as e:
+            logger.error("oauth_import_error error=%s", str(e))
+            return None
+
+        auth_file = self._next_auth_file()
+        try:
+            auth = await asyncio.to_thread(
+                get_reusable_auth,
+                auth_file=auth_file,
+                force_login=self._oauth_force_login,
+                open_browser=self._oauth_open_browser,
+            )
+        except Exception as e:
+            logger.error("oauth_auth_error error=%s", str(e))
+            return None
+
+        if not auth.access or not auth.account_id:
+            return None
+
+        try:
+            model = normalize_model(self._model)
+        except ValueError:
+            return None
+
+        return await query_codex(
+            access_token=auth.access,
+            account_id=auth.account_id,
+            model=model,
+            system_prompt=system_prompt,
+            user_message=user_prompt,
+            timeout=self._timeout,
+        )
+
     async def _call_oauth_codex(self, user_prompt: str) -> str | None:
         try:
             from coin_trader.llm.oauth_openai import get_reusable_auth, normalize_model
@@ -869,6 +1009,7 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
         current_symbol_position: dict[str, object] | None = None,
         recent_structure: dict[str, object] | None = None,
         volume_context: dict[str, object] | None = None,
+        news_context: str | None = None,
     ) -> str:
         _c = self._compact
         kst = datetime.now(timezone(timedelta(hours=9)))
@@ -888,6 +1029,8 @@ LANGUAGE: Write "reasoning" in Korean. Be concise and natural."""
             parts.append(f"\nVolume:\n{_c(volume_context)}")
         if btc_trend:
             parts.append(f"\nBTC Trend:\n{_c(btc_trend)}")
+        if news_context:
+            parts.append(f"\nMarket News Summary:\n{news_context}")
         if portfolio_exposure:
             parts.append(f"\nPortfolio Exposure:\n{_c(portfolio_exposure)}")
         if risk_context:

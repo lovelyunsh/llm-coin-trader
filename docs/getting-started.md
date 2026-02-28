@@ -160,27 +160,7 @@ LLM_OAUTH_OPEN_BROWSER=false
 
 ### 5.2 API 키 암호화 저장
 
-```bash
-# Docker 컨테이너 내부에서 실행
-docker exec -it coin-trader python -m coin_trader.main encrypt-keys --exchange upbit
-```
-
-또는 로컬 Python 환경에서:
-
-```bash
-trader encrypt-keys --exchange upbit
-```
-
-프롬프트 순서:
-```
-Master key: (마스터 키 입력 - 기억해야 합니다)
-Confirm master key: (재입력)
-API Key: (업비트 Access Key)
-API Secret: (업비트 Secret Key)
-Keys encrypted and saved to data/upbit_keys.enc
-```
-
-API 키는 Fernet 암호화되어 `data/upbit_keys.enc`에 저장됩니다. 원본 키는 어디에도 평문으로 저장되지 않습니다.
+API 키는 환경 변수(`UPBIT_MASTER_KEY`)로 복호화 키를 전달하고, `data/upbit_keys.enc`에 Fernet 암호화되어 저장됩니다. 원본 키는 어디에도 평문으로 저장되지 않습니다.
 
 ### 5.3 .env 설정
 
@@ -239,9 +219,7 @@ LOG_LEVEL=INFO
 
 ### API 키 암호화
 
-```bash
-docker exec -it coin-trader-binance python -m coin_trader.main encrypt-keys --exchange binance
-```
+API 키는 환경 변수(`BINANCE_MASTER_KEY`)로 복호화 키를 전달하고, `data/binance_keys.enc`에 Fernet 암호화되어 저장됩니다.
 
 ### 바이낸스 컨테이너 실행
 
