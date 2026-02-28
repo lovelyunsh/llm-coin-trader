@@ -968,6 +968,12 @@
                 <div class="decision-filters" id="decisionFilters">
                     <button class="decision-filter-btn active" onclick="setDecisionsFilter(null)">전체</button>
                 </div>
+                <div class="decision-filters" id="decisionActionFilters" style="margin-top:0.3rem">
+                    <button class="decision-filter-btn active" onclick="setDecisionsActionFilter(null)">전체</button>
+                    <button class="decision-filter-btn" onclick="setDecisionsActionFilter('BUY')">BUY</button>
+                    <button class="decision-filter-btn" onclick="setDecisionsActionFilter('SELL')">SELL</button>
+                    <button class="decision-filter-btn" onclick="setDecisionsActionFilter('HOLD')">HOLD</button>
+                </div>
                 <table>
                     <thead>
                         <tr>
@@ -1022,6 +1028,7 @@
         let refreshInterval5s = null;
         let refreshInterval15s = null;
         let _decisionsFilter = null;
+        let _decisionsActionFilter = null;
         let _availableSymbols = [];
 
         const PAGE_SIZE = 10;
@@ -1471,6 +1478,20 @@
             updateDecisions();
         }
 
+        function setDecisionsActionFilter(action) {
+            _decisionsActionFilter = action;
+            _decisionsPage = 0;
+            const container = document.getElementById('decisionActionFilters');
+            if (container) {
+                container.querySelectorAll('.decision-filter-btn').forEach(btn => {
+                    const btnAction = btn.getAttribute('onclick').match(/'([^']*)'/);
+                    const isMatch = btnAction ? btnAction[1] === action : action === null;
+                    btn.classList.toggle('active', isMatch);
+                });
+            }
+            renderDecisionsPage(0);
+        }
+
         async function updateDecisions() {
             try {
                 const endpoint = _decisionsFilter 
@@ -1486,17 +1507,20 @@
 
         function renderDecisionsPage(page) {
             const tbody = document.getElementById('decisionsTable');
-            if (_decisionsData.length === 0) {
+            const filtered = _decisionsActionFilter
+                ? _decisionsData.filter(d => d.final_action === _decisionsActionFilter)
+                : _decisionsData;
+            if (filtered.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="8" class="empty-state">AI 판단 내역이 없습니다</td></tr>';
                 document.getElementById('decisionsPagination').innerHTML = '';
                 return;
             }
-            const totalPages = Math.ceil(_decisionsData.length / PAGE_SIZE);
+            const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
             if (page >= totalPages) page = totalPages - 1;
             if (page < 0) page = 0;
             _decisionsPage = page;
 
-            const slice = _decisionsData.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+            const slice = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
             tbody.innerHTML = slice.map(decision => {
                 const finalActionBadge = decision.final_action === 'BUY' 
                     ? '<span class="badge badge-success">BUY</span>'
@@ -1549,7 +1573,7 @@
                     </tr>
                 `;
             }).join('');
-            renderPagination('decisionsPagination', page, _decisionsData.length, 'goDecisionsPage');
+            renderPagination('decisionsPagination', page, filtered.length, 'goDecisionsPage');
         }
 
         function goDecisionsPage(page) { renderDecisionsPage(page); }

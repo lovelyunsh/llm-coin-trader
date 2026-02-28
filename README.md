@@ -238,23 +238,17 @@ docker run -d --name coin-trader-binance \
 ### 컨테이너 관리
 
 ```bash
+# 시작 (빌드 포함)
+docker compose up -d --build
+
 # 로그 확인
-docker logs -f coin-trader
+docker compose logs -f coin-trader
 
 # 중지
-docker stop coin-trader
+docker compose down
 
-# 재시작
-docker start coin-trader
-
-# 이미지 재빌드 (코드 변경 시)
-docker build -t coin-trader . && docker rm -f coin-trader && \
-docker run -d --name coin-trader -p 8932:8932 \
-  -v "$(pwd)/.env:/app/.env:ro" \
-  -v "$(pwd)/data:/app/data" \
-  -v "$(pwd)/RUN:/app/RUN" \
-  -v "$(pwd)/logs:/app/logs" \
-  coin-trader
+# 재시작 (코드 변경 시 재빌드)
+docker compose down && docker compose up -d --build
 ```
 
 ## 웹 대시보드

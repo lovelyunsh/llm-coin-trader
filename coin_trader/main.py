@@ -251,6 +251,17 @@ async def _build_system(
 
         notifier = SlackNotifier(webhook_url=settings.slack_webhook_url)
 
+    # Pre-load latest news summary from DB so first ticks have news context
+    global _news_summary_cache
+    if settings.news_enabled and _news_summary_cache is None:
+        try:
+            cached = await store.get_latest_news_summary()
+            if cached:
+                _news_summary_cache = cached
+                logger.info("news_summary_preloaded_from_db")
+        except Exception:
+            pass
+
     return {
         "settings": settings,
         "store": store,
