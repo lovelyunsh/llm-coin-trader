@@ -51,6 +51,7 @@ class _Position:
 @dataclass
 class _RiskLimits:
     trailing_stop_pct: Decimal
+    trailing_stop_min_hold_hours: Decimal = Decimal("0")
 
 
 # ---------------------------------------------------------------------------

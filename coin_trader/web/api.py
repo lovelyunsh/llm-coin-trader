@@ -338,6 +338,7 @@ async def _trading_loop() -> None:
         _fetch_batch_tickers,
         _refresh_dynamic_symbols,
         _refresh_news,
+        _restore_state_on_startup,
         _run_tick,
         _scan_for_surges,
     )
@@ -345,6 +346,9 @@ async def _trading_loop() -> None:
     settings: Settings = _components["settings"]
     engine: Any = _components.get("engine")
     notifier: Any = _components.get("notifier")
+
+    await _restore_state_on_startup(_components)
+
     try:
         while _is_trading:
             if engine is not None:

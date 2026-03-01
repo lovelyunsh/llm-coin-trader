@@ -46,6 +46,7 @@ class RiskLimits:
     take_profit_pct: Decimal = Decimal("10")
     trailing_stop_enabled: bool = False
     trailing_stop_pct: Decimal = Decimal("5")
+    trailing_stop_min_hold_hours: Decimal = Decimal("2")
     circuit_breaker_threshold_pct: Decimal = Decimal("15")
     circuit_breaker_window_min: int = 5
     max_orders_per_second: int = 1
@@ -106,6 +107,9 @@ class Settings(BaseSettings):
     llm_min_confidence: float = Field(default=0.65)
     llm_recent_candles_count: int = Field(default=24)
     llm_recent_orders_count: int = Field(default=10)
+
+    # Buy execution tuning
+    buy_limit_spread_pct: Decimal = Field(default=Decimal("0.2"))
 
     # Stale order auto-cancel
     stale_order_timeout_sec: int = Field(default=300)

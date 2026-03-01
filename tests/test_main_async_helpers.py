@@ -282,19 +282,23 @@ async def test_execute_buy_cooldown_blocks_execution() -> None:
 
 
 async def test_execute_buy_surge_gating_skips_when_cache_full_low_confidence() -> None:
-    """Surge buy skipped when universe is full and confidence < 0.8."""
+    """Surge buy skipped when positions are at max and confidence < 0.8."""
     engine = _make_engine()
     settings = _settings()
     surge_sym = "XRP/KRW"
 
-    # Fill the cache to max_symbols
-    max_sym = int(settings.dynamic_symbol_max_symbols)
+    # Create mock positions at max_positions limit
+    max_pos = int(settings.risk.max_positions)
+    mock_positions = []
+    for i in range(max_pos):
+        mock_positions.append(
+            Mock(symbol=f"FAKE{i}/KRW", quantity=Decimal("100"))
+        )
+
     orig_cache = list(_main_mod._dynamic_symbols_cache)
     orig_last_buy = dict(_main_mod._last_buy_ts)
     try:
         _main_mod._dynamic_symbols_cache.clear()
-        for i in range(max_sym):
-            _main_mod._dynamic_symbols_cache.append(f"FAKE{i}/KRW")
 
         with patch("coin_trader.main.log_event"):
             await _execute_buy(
@@ -309,6 +313,7 @@ async def test_execute_buy_surge_gating_skips_when_cache_full_low_confidence() -
                 total_balance=_TOTAL_BALANCE,
                 now=_NOW,
                 surge_context={"is_surge": True},
+                positions=mock_positions,
             )
         engine.execute.assert_not_awaited()
     finally:
