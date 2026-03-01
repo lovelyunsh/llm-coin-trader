@@ -152,8 +152,50 @@ async def _restore_state_on_startup(components: dict[str, Any]) -> None:
                             _last_buy_ts[sym] = dt.timestamp()
                         restored_ts += 1
                     except (ValueError, AttributeError, TypeError):
-                        pass
+                        logger.debug("buy_ts_parse_failed", symbol=sym, exc_info=True)
         logger.info("buy_timestamps_restored", count=restored_ts)
+
+        # Restore LLM call cooldowns and surge cooldowns from recent orders
+        restored_llm = 0
+        restored_surge = 0
+        settings = components.get("settings")
+        base_symbols: set[str] = set()
+        if settings is not None:
+            base_symbols = set(settings.trading_symbols)
+            base_symbols.update(settings.get_always_keep_symbols())
+
+        for order in recent_orders:
+            sym = order.symbol
+            if sym is None:
+                continue
+            ts = order.updated_at or order.created_at
+            if ts is None:
+                continue
+            try:
+                order_ts = ts.timestamp() if hasattr(ts, "timestamp") else 0.0
+            except (ValueError, AttributeError, TypeError):
+                continue
+            if order_ts <= 0:
+                continue
+
+            # Restore LLM times: most recent order per symbol
+            if sym not in _last_llm_times:
+                _last_llm_times[sym] = order_ts
+                if order.price is not None:
+                    _last_llm_prices[sym] = order.price
+                restored_llm += 1
+
+            # Restore surge cooldowns: non-base-symbol buys
+            side_val = order.side.value if order.side and hasattr(order.side, "value") else ""
+            if side_val == "buy" and sym not in base_symbols and sym not in _surge_cooldowns:
+                _surge_cooldowns[sym] = order_ts
+                restored_surge += 1
+
+        logger.info(
+            "cooldowns_restored",
+            llm_times=restored_llm,
+            surge_cooldowns=restored_surge,
+        )
     except Exception:
         logger.warning("buy_timestamp_restore_failed", exc_info=True)
 
@@ -331,7 +373,7 @@ async def _build_system(
                 _news_summary_cache = cached
                 logger.info("news_summary_preloaded_from_db")
         except Exception:
-            pass
+            logger.warning("news_summary_preload_failed", exc_info=True)
 
     return {
         "settings": settings,
@@ -539,6 +581,7 @@ async def _compute_btc_trend(
         _btc_trend_cache_ts = now
         return result
     except Exception:
+        logger.warning("btc_trend_failed", exc_info=True)
         return None
 
 
@@ -570,6 +613,7 @@ async def _fetch_batch_tickers(
         raw = await exchange_adapter.get_tickers(symbols)
         return raw if isinstance(raw, dict) else {}
     except Exception:
+        logger.warning("batch_tickers_failed", symbol_count=len(symbols), exc_info=True)
         return {}
 
 
@@ -726,7 +770,7 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
                     }
                 )
         except Exception:
-            pass
+            logger.warning("position_pnl_calc_failed", exc_info=True)
 
     suffix = f"/{settings.quote_currency}"
     always_keep = [s for s in settings.get_always_keep_symbols() if s.endswith(suffix)]
@@ -747,7 +791,7 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
                 part = await exchange_adapter.get_orderbooks(chunk)
                 orderbooks.update(part)
             except Exception:
-                pass
+                logger.warning("orderbook_fetch_failed", chunk_size=len(chunk), exc_info=True)
 
     def _candidate_metrics(
         symbol: str,
@@ -859,7 +903,7 @@ async def _refresh_dynamic_symbols(components: dict[str, Any]) -> list[str]:
             if strategy is not None and exchange_adapter is not None:
                 btc_trend = await _compute_btc_trend(exchange_adapter, strategy, "")
         except Exception:
-            pass
+            logger.warning("btc_trend_compute_failed", exc_info=True)
 
         try:
             llm_decision = await llm_advisor.get_symbol_universe(
@@ -996,6 +1040,7 @@ async def _scan_for_surges(
             _surge_markets_cache = await exchange_adapter.get_tradeable_markets()
             _surge_markets_cache_ts = now
         except Exception:
+            logger.warning("surge_markets_refresh_failed", exc_info=True)
             if not _surge_markets_cache:
                 return []
 
@@ -1009,6 +1054,7 @@ async def _scan_for_surges(
             if batch_result:
                 all_tickers.update(batch_result)
         except Exception:
+            logger.warning("surge_ticker_batch_failed", batch_start=i, exc_info=True)
             continue
 
     # Compute turnover deltas
@@ -1335,6 +1381,7 @@ async def _get_llm_advice(
             news_context=_news_summary_cache,
         )
     except Exception:
+        logger.warning("llm_advice_failed", symbol=symbol, exc_info=True)
         return None
 
 
@@ -1919,6 +1966,7 @@ async def _run_tick(
             symbol, interval="1h", count=200
         )
     except Exception:
+        logger.warning("candle_fetch_failed", symbol=symbol, exc_info=True)
         base_candles = []
 
     strategy.update_candles(symbol, base_candles)
