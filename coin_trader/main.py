@@ -1540,6 +1540,20 @@ async def _run_tick(
             )
             return
 
+        # Gate surge buys when universe is full
+        if surge_context and symbol not in _dynamic_symbols_cache:
+            max_sym = int(settings.dynamic_symbol_max_symbols)
+            conf = float(advice.confidence) if advice else 0.0
+            if len(_dynamic_symbols_cache) >= max_sym and conf < 0.8:
+                logger.info(
+                    "surge_buy_skipped_universe_full",
+                    symbol=symbol,
+                    universe_size=len(_dynamic_symbols_cache),
+                    max_symbols=max_sym,
+                    confidence=conf,
+                )
+                return
+
         buy_pct = settings.risk.max_position_size_pct
         if advice is not None and advice.buy_pct is not None:
             buy_pct = max(
@@ -1595,7 +1609,11 @@ async def _run_tick(
                     if symbol not in _dynamic_symbols_cache:
                         _dynamic_symbols_cache.append(symbol)
                         settings.trading_symbols = list(_dynamic_symbols_cache)
-                        logger.info("surge_symbol_added_to_universe", symbol=symbol)
+                        logger.info(
+                            "surge_symbol_added_to_universe",
+                            symbol=symbol,
+                            universe_size=len(_dynamic_symbols_cache),
+                        )
                 log_event(
                     "order",
                     {
