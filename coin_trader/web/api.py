@@ -655,14 +655,14 @@ async def get_open_orders() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Surge scans
+# Generic JSONL log reader
 # ---------------------------------------------------------------------------
-def _read_surge_scan_logs(limit: int = 50) -> list[dict[str, Any]]:
+def _read_jsonl_log(filename: str, limit: int = 50) -> list[dict[str, Any]]:
     import json as _json
 
     settings: Settings | None = _components.get("settings")
     log_dir = settings.log_dir if settings else Path("logs")
-    file_path = log_dir / "surge_scans.jsonl"
+    file_path = log_dir / filename
     if not file_path.exists():
         return []
 
@@ -681,6 +681,13 @@ def _read_surge_scan_logs(limit: int = 50) -> list[dict[str, Any]]:
 
     entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
     return entries[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Surge scans
+# ---------------------------------------------------------------------------
+def _read_surge_scan_logs(limit: int = 50) -> list[dict[str, Any]]:
+    return _read_jsonl_log("surge_scans.jsonl", limit=limit)
 
 
 @app.get("/api/surge-scans")
@@ -700,29 +707,7 @@ async def get_surge_scans() -> JSONResponse:
 # Surge detections (per-symbol LLM decisions for surge-detected symbols)
 # ---------------------------------------------------------------------------
 def _read_surge_detection_logs(limit: int = 300) -> list[dict[str, Any]]:
-    import json as _json
-
-    settings: Settings | None = _components.get("settings")
-    log_dir = settings.log_dir if settings else Path("logs")
-    file_path = log_dir / "surge_detections.jsonl"
-    if not file_path.exists():
-        return []
-
-    entries: list[dict[str, Any]] = []
-    try:
-        lines = file_path.read_text(encoding="utf-8").strip().splitlines()
-        for line in lines[-limit:]:
-            try:
-                row = _json.loads(line)
-                if isinstance(row, dict):
-                    entries.append(row)
-            except _json.JSONDecodeError:
-                pass
-    except Exception:
-        return []
-
-    entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
-    return entries[:limit]
+    return _read_jsonl_log("surge_detections.jsonl", limit=limit)
 
 
 @app.get("/api/surge-detections")
@@ -774,29 +759,7 @@ def _read_decision_logs(
 
 
 def _read_symbol_decision_logs(limit: int = 200) -> list[dict[str, Any]]:
-    import json as _json
-
-    settings: Settings | None = _components.get("settings")
-    log_dir = settings.log_dir if settings else Path("logs")
-    file_path = log_dir / "symbol_decisions.jsonl"
-    if not file_path.exists():
-        return []
-
-    entries: list[dict[str, Any]] = []
-    try:
-        lines = file_path.read_text(encoding="utf-8").strip().splitlines()
-        for line in lines[-limit:]:
-            try:
-                row = _json.loads(line)
-                if isinstance(row, dict):
-                    entries.append(row)
-            except _json.JSONDecodeError:
-                pass
-    except Exception:
-        return []
-
-    entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
-    return entries[:limit]
+    return _read_jsonl_log("symbol_decisions.jsonl", limit=limit)
 
 
 @app.get("/api/decisions")

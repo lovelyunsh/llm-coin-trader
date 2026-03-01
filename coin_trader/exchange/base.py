@@ -18,6 +18,21 @@ from tenacity import (
     wait_exponential,
 )
 
+QueryParams: TypeAlias = dict[str, str]
+JsonObject: TypeAlias = dict[str, object]
+JsonArray: TypeAlias = list[object]
+
+
+def _as_str_object_dict(value: object) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    raw = cast(dict[object, object], value)
+    for key in raw.keys():
+        if not isinstance(key, str):
+            return None
+    return cast(JsonObject, raw)
+
+
 _API_METRICS: dict[str, object] = {
     "total_requests": 0,
     "total_429": 0,

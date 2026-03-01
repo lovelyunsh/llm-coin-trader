@@ -7,17 +7,15 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import click
 
-from coin_trader.config.settings import RiskLimits, Settings
+from coin_trader.config.settings import Settings
 from coin_trader.core.models import (
     ExchangeName,
     MarketData,
@@ -41,39 +39,52 @@ from coin_trader.state.store import StateStore
 
 logger = get_logger("main")
 
+# ---------------------------------------------------------------------------
+# Per-symbol position tracking (watermarks, cooldowns)
+# ---------------------------------------------------------------------------
 _high_watermarks: dict[str, Decimal] = {}
 _low_watermarks: dict[str, Decimal] = {}  # for short trailing stops
-_last_llm_prices: dict[str, Decimal] = {}
-_last_llm_times: dict[str, float] = {}
-# LLM skip: 가격 변동 < 1% AND 경과 < 30분이면 LLM 호출 생략 (API 비용 절감)
-# 단, 소프트 손절/익절 구간이면 강제 호출 (main.py 내 force override 참고)
-_LLM_SKIP_THRESHOLD_PCT = Decimal("1.0")
-_LLM_MAX_SKIP_SECONDS = 1800.0
-_recent_decisions: dict[str, list[dict[str, str]]] = {}
-_MAX_DECISION_HISTORY = 5
-# 심볼별 매수 쿨다운: 동일 코인 반복매수 방지 (RENDER 49분 3회, ETH 43분 5회 문제 해결)
 _last_buy_ts: dict[str, float] = {}
 _BUY_COOLDOWN_SECONDS = 1800.0
-# 최소 주문금액: 수수료 대비 의미없는 소액거래 차단 (거래소별)
 _MIN_ORDER_VALUE: dict[str, Decimal] = {
     "KRW": Decimal("5000"),
     "USDT": Decimal("5"),
 }
 
+# ---------------------------------------------------------------------------
+# LLM skip heuristic: skip call when price < 1% change AND < 30min elapsed
+# Force override in soft stop-loss / take-profit zones (see _run_tick)
+# ---------------------------------------------------------------------------
+_last_llm_prices: dict[str, Decimal] = {}
+_last_llm_times: dict[str, float] = {}
+_LLM_SKIP_THRESHOLD_PCT = Decimal("1.0")
+_LLM_MAX_SKIP_SECONDS = 1800.0
+_recent_decisions: dict[str, list[dict[str, str]]] = {}
+_MAX_DECISION_HISTORY = 5
+
+# ---------------------------------------------------------------------------
+# BTC macro trend cache (daily candles, refreshed hourly)
+# ---------------------------------------------------------------------------
 _btc_trend_cache: dict[str, object] = {}
 _btc_trend_cache_ts: float = 0.0
-_BTC_TREND_CACHE_TTL = 900.0  # 15 min — daily candles change slowly
+_BTC_TREND_CACHE_TTL = 900.0
 _btc_reference_symbol = "BTC/KRW"  # set from settings at startup
 _btc_daily_candles: list[dict[str, object]] = []
 _btc_daily_candles_ts: float = 0.0
-_BTC_DAILY_CANDLE_REFRESH = 3600.0  # refetch daily candles hourly
+_BTC_DAILY_CANDLE_REFRESH = 3600.0
 _btc_daily_strategy: Any = None
+
+# ---------------------------------------------------------------------------
+# Dynamic symbol universe
+# ---------------------------------------------------------------------------
 _dynamic_symbols_cache: list[str] = []
 _dynamic_symbols_cache_ts: float = 0.0
 _previous_universe_selections: list[dict[str, object]] = []
 _MAX_UNIVERSE_HISTORY = 3
 
+# ---------------------------------------------------------------------------
 # Surge detection state
+# ---------------------------------------------------------------------------
 _surge_candidates: list[str] = []
 _surge_scan_ts: float = 0.0
 _surge_turnover_snapshots: dict[str, Decimal] = {}
@@ -82,7 +93,9 @@ _surge_cooldowns: dict[str, float] = {}
 _surge_markets_cache: list[str] = []
 _surge_markets_cache_ts: float = 0.0
 
-# News (Coinness Telegram)
+# ---------------------------------------------------------------------------
+# News cache (Coinness Telegram)
+# ---------------------------------------------------------------------------
 _news_fetch_ts: float = 0.0
 _news_summary_cache: str | None = None
 
@@ -296,7 +309,8 @@ def _resolve_action(
 
     if advice is None:
         # LLM skipped or failed: hold position.
-        # Hard stop-loss / trailing stop are handled independently in position_protection (section 8).
+        # Hard stop-loss / trailing stop handled independently in
+        # position_protection (section 6).
         return "HOLD"
 
     llm_action = advice.action
@@ -1016,6 +1030,683 @@ def _build_surge_context(symbol: str) -> dict[str, object]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers for _run_tick action execution
+# ---------------------------------------------------------------------------
+
+
+def _build_order_reason(
+    signals: list[Any], advice: Any | None, default_verb: str
+) -> str:
+    """Build a human-readable reason string from strategy signals and LLM advice."""
+    parts: list[str] = []
+    if signals:
+        parts.append(f"Strategy: {signals[0].metadata.get('reason', default_verb)}")
+    if advice:
+        parts.append(f"LLM: {advice.reasoning[:100]}")
+    return " | ".join(p for p in parts if p)
+
+
+async def _log_and_notify_order(
+    order: Any,
+    *,
+    settings: Settings,
+    notifier: Any | None,
+    sizing_pct: Decimal | str,
+    alert_title: str,
+    alert_label: str,
+    severity: str = "medium",
+    extra_log: dict[str, object] | None = None,
+) -> None:
+    """Log an order event and send a live-mode notification."""
+    log_data: dict[str, object] = {
+        "order_id": order.order_id,
+        "symbol": order.symbol,
+        "side": order.side.value,
+        "status": order.status.value,
+        "quantity": str(order.quantity),
+        "price": str(order.price),
+        "sizing_pct": str(sizing_pct),
+    }
+    if extra_log:
+        log_data.update(extra_log)
+    log_event("order", log_data)
+
+    if notifier and settings.is_live_mode() and hasattr(notifier, "send_alert"):
+        await notifier.send_alert(
+            alert_title,
+            (
+                f"{order.symbol} {alert_label} {order.quantity} @ {order.price}"
+                f"\nstatus={order.status.value}, sizing_pct={sizing_pct}"
+            ),
+            severity,
+        )
+
+
+async def _get_llm_advice(
+    *,
+    llm_advisor: Any,
+    symbol: str,
+    now: datetime,
+    trade_price: Decimal,
+    prev_close: Decimal,
+    md: MarketData,
+    signals: list[Any],
+    positions: list[Any],
+    balances: Any,
+    total_balance: Decimal,
+    store: StateStore,
+    strategy: Any,
+    exchange_adapter: Any,
+    settings: Settings,
+    surge_context: dict[str, object] | None,
+) -> Any | None:
+    """Prepare full LLM context and call get_advice. Returns advice or None."""
+    try:
+        change_24h_pct = Decimal("0")
+        if prev_close > 0:
+            change_24h_pct = (
+                (trade_price - prev_close) / prev_close * Decimal("100")
+            )
+
+        market_summary: dict[str, object] = {
+            "symbol": symbol,
+            "timeframe": "1h",
+            "current_time": now.isoformat().replace("+00:00", "Z"),
+            "price": str(trade_price),
+            "open": str(md.open),
+            "high": str(md.high),
+            "low": str(md.low),
+            "volume": str(md.volume),
+            "change_24h_pct": str(round(change_24h_pct, 2)),
+        }
+        strategy_signal_data = [
+            {
+                "signal_type": s.signal_type.value,
+                "confidence": str(s.confidence),
+                "metadata": s.metadata,
+            }
+            for s in signals
+        ]
+
+        indicators = strategy.compute_indicators(symbol)
+        indicators_dict = indicators.to_llm_dict() if indicators else None
+        if indicators_dict:
+            indicators_dict.pop("current_price", None)
+
+        position_data = []
+        for p in positions:
+            if p.quantity <= 0:
+                continue
+            if p.symbol == symbol:
+                pos_price = trade_price
+                pos_with_price = p.model_copy(update={"current_price": trade_price})
+            else:
+                pos_price = p.current_price or Decimal("0")
+                pos_with_price = p
+            position_data.append(
+                {
+                    "symbol": p.symbol,
+                    "quantity": str(p.quantity),
+                    "average_entry_price": str(p.average_entry_price),
+                    "current_price": str(pos_price),
+                    "unrealized_pnl_pct": str(
+                        pos_with_price.unrealized_pnl_pct or 0
+                    ),
+                }
+            )
+
+        portfolio_exposure = _compute_portfolio_exposure(positions, total_balance)
+
+        quote = (
+            settings.quote_currency
+            if hasattr(settings, "quote_currency")
+            else "KRW"
+        )
+        available_cash = balances.balances.get(quote, Decimal("0"))
+        balance_data: dict[str, object] = {
+            f"total_portfolio_value_{quote.lower()}": str(total_balance),
+            f"available_cash_{quote.lower()}": str(available_cash),
+            "position_count": len(positions),
+        }
+
+        recent_orders_data = []
+        for o in await store.get_all_orders(limit=settings.llm_recent_orders_count):
+            ago_sec = (now - o.created_at).total_seconds() if o.created_at else 0
+            if ago_sec < 3600:
+                ago_str = f"{int(ago_sec // 60)}min ago"
+            elif ago_sec < 86400:
+                ago_str = f"{ago_sec / 3600:.1f}h ago"
+            else:
+                ago_str = f"{ago_sec / 86400:.1f}d ago"
+            recent_orders_data.append(
+                {
+                    "symbol": o.symbol,
+                    "side": o.side.value,
+                    "quantity": str(o.quantity),
+                    "price": str(o.price),
+                    "status": o.status.value,
+                    "ago": ago_str,
+                }
+            )
+
+        candles = strategy._candle_history.get(symbol, [])
+        recent_candles_data = [
+            {
+                "open": str(c.get("open", 0)),
+                "high": str(c.get("high", 0)),
+                "low": str(c.get("low", 0)),
+                "close": str(c.get("close", 0)),
+                "volume": str(c.get("volume", 0)),
+            }
+            for c in candles[-settings.llm_recent_candles_count :]
+        ]
+
+        btc_trend = await _compute_btc_trend(exchange_adapter, strategy, symbol)
+
+        atr_stop_distance: str | None = None
+        if indicators and indicators.atr > 0:
+            atr_stop_distance = str(
+                round(indicators.atr * float(settings.risk.atr_stop_multiplier), 2)
+            )
+
+        risk_context: dict[str, object] = {
+            "atr_stop_distance": atr_stop_distance,
+            "max_single_coin_exposure_pct": str(
+                settings.risk.max_single_coin_exposure_pct
+            ),
+            "max_alt_total_exposure_pct": str(
+                settings.risk.max_alt_total_exposure_pct
+            ),
+        }
+
+        current_symbol_position: dict[str, object] | None = None
+        for p in positions:
+            if p.symbol == symbol and p.quantity > 0:
+                pos_with = p.model_copy(update={"current_price": trade_price})
+                pos_value = p.quantity * trade_price
+                pos_pct = (
+                    float(pos_value / total_balance * Decimal("100"))
+                    if total_balance > 0
+                    else 0.0
+                )
+                current_symbol_position = {
+                    "quantity": str(p.quantity),
+                    "average_entry_price": str(p.average_entry_price),
+                    "unrealized_pnl_pct": str(pos_with.unrealized_pnl_pct or 0),
+                    "position_value_pct_of_portfolio": round(pos_pct, 2),
+                }
+                break
+
+        symbol_candles = strategy._candle_history.get(symbol, [])
+        recent_structure = _compute_recent_structure(symbol_candles)
+        volume_context = _compute_volume_context(symbol_candles)
+        if surge_context:
+            volume_context.update(surge_context)
+
+        return await llm_advisor.get_advice(
+            symbol,
+            market_summary,
+            strategy_signal_data,
+            technical_indicators=indicators_dict,
+            positions=position_data,
+            balance_info=balance_data,
+            recent_orders=recent_orders_data,
+            recent_candles=recent_candles_data,
+            previous_decisions=_recent_decisions.get(symbol, []),
+            btc_trend=btc_trend,
+            portfolio_exposure=portfolio_exposure,
+            risk_context=risk_context,
+            current_symbol_position=current_symbol_position,
+            recent_structure=recent_structure,
+            volume_context=volume_context,
+            news_context=_news_summary_cache,
+        )
+    except Exception:
+        return None
+
+
+async def _handle_position_protection(
+    *,
+    symbol: str,
+    positions: list[Any],
+    trade_price: Decimal,
+    risk_limits: Any,
+    advice: Any | None,
+    engine: ExecutionEngine,
+    settings: Settings,
+    state: dict[str, Any],
+    notifier: Any | None,
+    now: datetime,
+) -> bool:
+    """Check stop-loss, trailing stop, and execute position protection orders.
+
+    Returns True if a protection order was executed (caller should skip further actions).
+    """
+    for pos in positions:
+        if pos.symbol != symbol or pos.quantity <= 0:
+            continue
+
+        is_short = pos.side == PositionSide.SHORT
+        pos_with_price = pos.model_copy(update={"current_price": trade_price})
+        pnl_pct = pos_with_price.unrealized_pnl_pct
+        if pnl_pct is None:
+            continue
+
+        exit_side = OrderSide.BUY if is_short else OrderSide.SELL
+        llm_exit_action = "COVER_CONSIDER" if is_short else "SELL_CONSIDER"
+        exit_label = "COVER" if is_short else "SELL"
+
+        close_reason: str | None = None
+        use_market_order = False
+
+        # Hard stop-loss
+        if pnl_pct <= -abs(risk_limits.stop_loss_pct):
+            close_reason = (
+                f"hard_stop_loss: pnl={pnl_pct:.2f}% <= -{risk_limits.stop_loss_pct}%"
+            )
+            use_market_order = True
+
+        # Soft stop-loss (requires LLM approval)
+        elif pnl_pct <= -abs(risk_limits.soft_stop_loss_pct):
+            if advice is not None and advice.action == llm_exit_action:
+                close_reason = (
+                    f"soft_stop_loss (LLM approved): pnl={pnl_pct:.2f}%, "
+                    f"LLM={advice.action}({advice.confidence})"
+                )
+            else:
+                log_event(
+                    "decision",
+                    {
+                        "symbol": symbol,
+                        "final_action": "HOLD",
+                        "trigger": "soft_stop_loss_held",
+                        "position_side": pos.side.value,
+                        "pnl_pct": str(pnl_pct),
+                        "llm_action": advice.action if advice else "none",
+                        "llm_reasoning": advice.reasoning if advice else "no LLM",
+                        "price": str(trade_price),
+                    },
+                )
+
+        # Trailing stop
+        elif risk_limits.trailing_stop_enabled:
+            close_reason = _check_trailing_stop(
+                symbol, trade_price, pos, risk_limits, is_short
+            )
+
+        if close_reason is None:
+            continue
+
+        log_event(
+            "decision",
+            {
+                "symbol": symbol,
+                "final_action": exit_label,
+                "trigger": "position_protection",
+                "position_side": pos.side.value,
+                "reason": close_reason,
+                "pnl_pct": str(pnl_pct),
+                "price": str(trade_price),
+            },
+        )
+        intent = OrderIntent(
+            signal_id=uuid4(),
+            exchange=settings.exchange,
+            symbol=symbol,
+            side=exit_side,
+            order_type=OrderType.MARKET if use_market_order else OrderType.LIMIT,
+            quantity=pos.quantity,
+            price=trade_price,
+            reason=close_reason,
+            reduce_only=True,
+            position_side=pos.side if is_short else None,
+            timestamp=now,
+        )
+        order = await engine.execute(intent, state)
+        if order:
+            await _log_and_notify_order(
+                order,
+                settings=settings,
+                notifier=notifier,
+                sizing_pct="100",
+                alert_title=f"포지션 보호 {exit_label} 체결 요청",
+                alert_label=exit_label,
+                severity="high",
+                extra_log={
+                    "trigger": "position_protection",
+                    "position_side": pos.side.value,
+                },
+            )
+            if is_short:
+                _low_watermarks.pop(symbol, None)
+            else:
+                _high_watermarks.pop(symbol, None)
+            return True
+
+    return False
+
+
+def _check_trailing_stop(
+    symbol: str,
+    trade_price: Decimal,
+    pos: Any,
+    risk_limits: Any,
+    is_short: bool,
+) -> str | None:
+    """Check trailing stop condition and return close reason if triggered."""
+    if is_short:
+        lw = _low_watermarks.get(symbol, pos.average_entry_price)
+        if trade_price < lw:
+            _low_watermarks[symbol] = trade_price
+            lw = trade_price
+        if lw < pos.average_entry_price and lw > 0:
+            bounce_from_low = (trade_price - lw) / lw * Decimal("100")
+            if bounce_from_low >= risk_limits.trailing_stop_pct:
+                return (
+                    f"trailing_stop_short: bounce={bounce_from_low:.2f}% "
+                    f"from low={lw}, threshold={risk_limits.trailing_stop_pct}%"
+                )
+    else:
+        hw = _high_watermarks.get(symbol, pos.average_entry_price)
+        if trade_price > hw:
+            _high_watermarks[symbol] = trade_price
+            hw = trade_price
+        if hw > pos.average_entry_price:
+            drop_from_high = (hw - trade_price) / hw * Decimal("100")
+            if drop_from_high >= risk_limits.trailing_stop_pct:
+                return (
+                    f"trailing_stop: drop={drop_from_high:.2f}% "
+                    f"from high={hw}, threshold={risk_limits.trailing_stop_pct}%"
+                )
+    return None
+
+
+async def _execute_buy(
+    *,
+    symbol: str,
+    signals: list[Any],
+    advice: Any | None,
+    settings: Settings,
+    engine: ExecutionEngine,
+    state: dict[str, Any],
+    notifier: Any | None,
+    trade_price: Decimal,
+    total_balance: Decimal,
+    now: datetime,
+    surge_context: dict[str, object] | None,
+) -> None:
+    """Execute a BUY action with cooldown, sizing, and surge gating."""
+    cooldown_elapsed = time.time() - _last_buy_ts.get(symbol, 0.0)
+    if cooldown_elapsed < _BUY_COOLDOWN_SECONDS:
+        remaining = int(_BUY_COOLDOWN_SECONDS - cooldown_elapsed)
+        logger.info("buy_cooldown_active", symbol=symbol, remaining_sec=remaining)
+        return
+
+    if surge_context and symbol not in _dynamic_symbols_cache:
+        max_sym = int(settings.dynamic_symbol_max_symbols)
+        conf = float(advice.confidence) if advice else 0.0
+        if len(_dynamic_symbols_cache) >= max_sym and conf < 0.8:
+            logger.info(
+                "surge_buy_skipped_universe_full",
+                symbol=symbol,
+                universe_size=len(_dynamic_symbols_cache),
+                max_symbols=max_sym,
+                confidence=conf,
+            )
+            return
+
+    buy_pct = settings.risk.max_position_size_pct
+    if advice is not None and advice.buy_pct is not None:
+        buy_pct = max(
+            Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct)
+        )
+    if surge_context and buy_pct > settings.surge_max_buy_pct:
+        buy_pct = settings.surge_max_buy_pct
+
+    order_price = trade_price
+    if advice is not None and advice.target_price is not None:
+        order_price = advice.target_price
+    order_value = total_balance * buy_pct / Decimal("100")
+
+    min_order_value = _MIN_ORDER_VALUE.get(settings.quote_currency, Decimal("5"))
+    if order_value < min_order_value:
+        logger.info(
+            "buy_below_minimum",
+            symbol=symbol,
+            order_value=str(order_value),
+            minimum=str(min_order_value),
+        )
+        return
+
+    if order_value <= 0:
+        return
+
+    use_market = advice is not None and advice.order_type == "market"
+    intent = OrderIntent(
+        signal_id=signals[0].signal_id if signals else uuid4(),
+        exchange=settings.exchange,
+        symbol=symbol,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
+        quote_quantity=order_value,
+        price=order_price,
+        reason=_build_order_reason(signals, advice, "buy"),
+        timestamp=now,
+    )
+    order = await engine.execute(intent, state)
+    if order:
+        _last_buy_ts[symbol] = time.time()
+        if surge_context:
+            _surge_cooldowns[symbol] = time.time()
+            if symbol not in _dynamic_symbols_cache:
+                _dynamic_symbols_cache.append(symbol)
+                settings.trading_symbols = list(_dynamic_symbols_cache)
+                logger.info(
+                    "surge_symbol_added_to_universe",
+                    symbol=symbol,
+                    universe_size=len(_dynamic_symbols_cache),
+                )
+        await _log_and_notify_order(
+            order,
+            settings=settings,
+            notifier=notifier,
+            sizing_pct=buy_pct,
+            alert_title="실제 매수 체결 요청",
+            alert_label="BUY",
+            severity="medium",
+        )
+
+
+async def _execute_sell(
+    *,
+    symbol: str,
+    signals: list[Any],
+    advice: Any | None,
+    settings: Settings,
+    engine: ExecutionEngine,
+    state: dict[str, Any],
+    notifier: Any | None,
+    positions: list[Any],
+    trade_price: Decimal,
+    now: datetime,
+) -> None:
+    """Execute a SELL action with quick-flip protection and partial sell support."""
+    sell_since_buy = time.time() - _last_buy_ts.get(symbol, 0.0)
+    if sell_since_buy < _BUY_COOLDOWN_SECONDS:
+        logger.info(
+            "quick_flip_blocked",
+            symbol=symbol,
+            seconds_since_buy=int(sell_since_buy),
+            cooldown=int(_BUY_COOLDOWN_SECONDS),
+        )
+        return
+
+    for pos in positions:
+        if pos.symbol != symbol or pos.quantity <= 0:
+            continue
+
+        sell_qty = pos.quantity
+        sell_pct = Decimal("100")
+        if advice is not None and advice.sell_pct is not None:
+            sell_pct = max(Decimal("0"), min(advice.sell_pct, Decimal("100")))
+            sell_qty = pos.quantity * sell_pct / Decimal("100")
+        if sell_qty <= 0:
+            continue
+
+        # 잔여분이 최소 주문금액 미만이면 전량 매도
+        remaining_value = (pos.quantity - sell_qty) * trade_price
+        min_order_value = _MIN_ORDER_VALUE.get(
+            settings.quote_currency, Decimal("5")
+        )
+        if remaining_value < min_order_value:
+            sell_qty = pos.quantity
+
+        order_price = trade_price
+        if advice is not None and advice.target_price is not None:
+            order_price = advice.target_price
+        use_market = advice is not None and advice.order_type == "market"
+        intent = OrderIntent(
+            signal_id=signals[0].signal_id if signals else uuid4(),
+            exchange=settings.exchange,
+            symbol=symbol,
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
+            quantity=sell_qty,
+            price=None if use_market else order_price,
+            reason=_build_order_reason(signals, advice, "sell"),
+            timestamp=now,
+        )
+        order = await engine.execute(intent, state)
+        if order:
+            await _log_and_notify_order(
+                order,
+                settings=settings,
+                notifier=notifier,
+                sizing_pct=sell_pct,
+                alert_title="실제 매도 체결 요청",
+                alert_label="SELL",
+                severity="high",
+            )
+
+
+async def _execute_short(
+    *,
+    symbol: str,
+    signals: list[Any],
+    advice: Any | None,
+    settings: Settings,
+    engine: ExecutionEngine,
+    state: dict[str, Any],
+    notifier: Any | None,
+    trade_price: Decimal,
+    total_balance: Decimal,
+    now: datetime,
+) -> None:
+    """Execute a SHORT action (futures only)."""
+    short_pct = settings.risk.max_position_size_pct
+    if advice is not None and advice.short_pct is not None:
+        short_pct = max(
+            Decimal("0"), min(advice.short_pct, settings.risk.max_position_size_pct)
+        )
+    order_price = trade_price
+    if advice is not None and advice.target_price is not None:
+        order_price = advice.target_price
+    order_value = total_balance * short_pct / Decimal("100")
+    if order_value <= 0:
+        return
+
+    use_market = advice is not None and advice.order_type == "market"
+    intent = OrderIntent(
+        signal_id=signals[0].signal_id if signals else uuid4(),
+        exchange=settings.exchange,
+        symbol=symbol,
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
+        quote_quantity=order_value,
+        price=None if use_market else order_price,
+        reason=_build_order_reason(signals, advice, "short"),
+        position_side=PositionSide.SHORT,
+        timestamp=now,
+    )
+    order = await engine.execute(intent, state)
+    if order:
+        await _log_and_notify_order(
+            order,
+            settings=settings,
+            notifier=notifier,
+            sizing_pct=short_pct,
+            alert_title="숏 포지션 진입 요청",
+            alert_label="SHORT",
+            severity="medium",
+            extra_log={"position_side": "short"},
+        )
+
+
+async def _execute_cover(
+    *,
+    symbol: str,
+    signals: list[Any],
+    advice: Any | None,
+    settings: Settings,
+    engine: ExecutionEngine,
+    state: dict[str, Any],
+    notifier: Any | None,
+    positions: list[Any],
+    trade_price: Decimal,
+    now: datetime,
+) -> None:
+    """Execute a COVER action — close short position (futures only)."""
+    for pos in positions:
+        if (
+            pos.symbol != symbol
+            or pos.quantity <= 0
+            or pos.side != PositionSide.SHORT
+        ):
+            continue
+
+        cover_qty = pos.quantity
+        cover_pct = Decimal("100")
+        if advice is not None and advice.sell_pct is not None:
+            cover_pct = max(Decimal("0"), min(advice.sell_pct, Decimal("100")))
+            cover_qty = pos.quantity * cover_pct / Decimal("100")
+        if cover_qty <= 0:
+            continue
+
+        use_market = advice is not None and advice.order_type == "market"
+        intent = OrderIntent(
+            signal_id=signals[0].signal_id if signals else uuid4(),
+            exchange=settings.exchange,
+            symbol=symbol,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET if use_market else OrderType.LIMIT,
+            quantity=cover_qty,
+            price=trade_price,
+            reason=_build_order_reason(signals, advice, "cover"),
+            reduce_only=True,
+            position_side=PositionSide.SHORT,
+            timestamp=now,
+        )
+        order = await engine.execute(intent, state)
+        if order:
+            await _log_and_notify_order(
+                order,
+                settings=settings,
+                notifier=notifier,
+                sizing_pct=cover_pct,
+                alert_title="숏 포지션 커버 요청",
+                alert_label="COVER",
+                severity="high",
+                extra_log={"position_side": "short"},
+            )
+            _low_watermarks.pop(symbol, None)
+
+
+# ---------------------------------------------------------------------------
+# Main tick function
+# ---------------------------------------------------------------------------
+
+
 async def _run_tick(
     components: dict[str, Any],
     symbol: str,
@@ -1080,6 +1771,7 @@ async def _run_tick(
         ask=Decimal(str(ticker.get("ask", 0))) or None,
     )
 
+    # 2. Anomaly & circuit breaker checks
     price_event = anomaly_monitor.check_price_anomaly(md)
     if price_event:
         await store.save_safety_event(price_event)
@@ -1091,7 +1783,6 @@ async def _run_tick(
     if prev_close > 0:
         price_change_pct = abs(trade_price - prev_close) / prev_close * Decimal("100")
         if risk_manager.check_circuit_breaker(price_change_pct):
-            # Bypass circuit breaker if we hold a position in this symbol
             held_positions = await broker.fetch_positions()
             has_position = any(
                 p.symbol == symbol and p.quantity > 0 for p in held_positions
@@ -1114,6 +1805,7 @@ async def _run_tick(
                 reason="holding position",
             )
 
+    # 3. Candles & strategy signals
     try:
         base_candles = await exchange_adapter.get_candles(
             symbol, interval="1h", count=200
@@ -1122,11 +1814,9 @@ async def _run_tick(
         base_candles = []
 
     strategy.update_candles(symbol, base_candles)
-
-    # 5. Run strategy
     signals = await strategy.on_tick(md)
 
-    # 6. Build state for risk checks
+    # 4. Build state for risk checks
     balances = await broker.fetch_balances()
     positions = await broker.fetch_positions()
     await store.save_balance_snapshot(balances)
@@ -1151,20 +1841,20 @@ async def _run_tick(
         "market_price": trade_price,
     }
 
-    # 7. LLM advisory (runs before position protection for soft stop / take-profit queries)
+    # 5. LLM advisory
     llm_advisor = components.get("llm_advisor")
     advice = None
-    _skip_llm = False
+    skip_llm = False
     if llm_advisor is not None:
         last_price = _last_llm_prices.get(symbol)
         if last_price is not None and last_price > 0:
             change_pct = abs(trade_price - last_price) / last_price * 100
             elapsed = time.time() - _last_llm_times.get(symbol, 0.0)
             if change_pct < _LLM_SKIP_THRESHOLD_PCT and elapsed < _LLM_MAX_SKIP_SECONDS:
-                _skip_llm = True
+                skip_llm = True
 
-        # Force LLM when position is in soft stop or take-profit zone
-        if _skip_llm:
+        # Force LLM when position is in soft stop zone
+        if skip_llm:
             for pos in positions:
                 if pos.symbol == symbol and pos.quantity > 0:
                     pos_with = pos.model_copy(update={"current_price": trade_price})
@@ -1172,317 +1862,50 @@ async def _run_tick(
                     if pnl is not None and pnl <= -abs(
                         settings.risk.soft_stop_loss_pct
                     ):
-                        _skip_llm = False
+                        skip_llm = False
                     break
 
-    if llm_advisor is not None and not _skip_llm:
-        try:
-            change_24h_pct = Decimal("0")
-            if prev_close > 0:
-                change_24h_pct = (
-                    (trade_price - prev_close) / prev_close * Decimal("100")
-                )
-
-            market_summary: dict[str, object] = {
-                "symbol": symbol,
-                "timeframe": "1h",
-                "current_time": now.isoformat().replace("+00:00", "Z"),
-                "price": str(trade_price),
-                "open": str(md.open),
-                "high": str(md.high),
-                "low": str(md.low),
-                "volume": str(md.volume),
-                "change_24h_pct": str(round(change_24h_pct, 2)),
-            }
-            strategy_signal_data = [
-                {
-                    "signal_type": s.signal_type.value,
-                    "confidence": str(s.confidence),
-                    "metadata": s.metadata,
-                }
-                for s in signals
-            ]
-
-            indicators = strategy.compute_indicators(symbol)
-            indicators_dict = indicators.to_llm_dict() if indicators else None
-            if indicators_dict:
-                indicators_dict.pop("current_price", None)
-
-            position_data = []
-            for p in positions:
-                if p.quantity <= 0:
-                    continue
-                if p.symbol == symbol:
-                    pos_price = trade_price
-                    pos_with_price = p.model_copy(update={"current_price": trade_price})
-                else:
-                    pos_price = p.current_price or Decimal("0")
-                    pos_with_price = p
-                position_data.append(
-                    {
-                        "symbol": p.symbol,
-                        "quantity": str(p.quantity),
-                        "average_entry_price": str(p.average_entry_price),
-                        "current_price": str(pos_price),
-                        "unrealized_pnl_pct": str(
-                            pos_with_price.unrealized_pnl_pct or 0
-                        ),
-                    }
-                )
-
-            portfolio_exposure = _compute_portfolio_exposure(positions, total_balance)
-
-            quote = (
-                settings.quote_currency
-                if hasattr(settings, "quote_currency")
-                else "KRW"
-            )
-            available_cash = balances.balances.get(quote, Decimal("0"))
-            balance_data: dict[str, object] = {
-                f"total_portfolio_value_{quote.lower()}": str(total_balance),
-                f"available_cash_{quote.lower()}": str(available_cash),
-                "position_count": len(positions),
-            }
-
-            recent_orders_data = []
-            for o in await store.get_all_orders(limit=settings.llm_recent_orders_count):
-                ago_sec = (now - o.created_at).total_seconds() if o.created_at else 0
-                if ago_sec < 3600:
-                    ago_str = f"{int(ago_sec // 60)}min ago"
-                elif ago_sec < 86400:
-                    ago_str = f"{ago_sec / 3600:.1f}h ago"
-                else:
-                    ago_str = f"{ago_sec / 86400:.1f}d ago"
-                recent_orders_data.append(
-                    {
-                        "symbol": o.symbol,
-                        "side": o.side.value,
-                        "quantity": str(o.quantity),
-                        "price": str(o.price),
-                        "status": o.status.value,
-                        "ago": ago_str,
-                    }
-                )
-
-            candles = strategy._candle_history.get(symbol, [])
-            recent_candles_data = [
-                {
-                    "open": str(c.get("open", 0)),
-                    "high": str(c.get("high", 0)),
-                    "low": str(c.get("low", 0)),
-                    "close": str(c.get("close", 0)),
-                    "volume": str(c.get("volume", 0)),
-                }
-                for c in candles[-settings.llm_recent_candles_count :]
-            ]
-
-            btc_trend = await _compute_btc_trend(exchange_adapter, strategy, symbol)
-
-            atr_stop_distance: str | None = None
-            if indicators and indicators.atr > 0:
-                atr_stop_distance = str(
-                    round(indicators.atr * float(settings.risk.atr_stop_multiplier), 2)
-                )
-
-            risk_context: dict[str, object] = {
-                "atr_stop_distance": atr_stop_distance,
-                "max_single_coin_exposure_pct": str(
-                    settings.risk.max_single_coin_exposure_pct
-                ),
-                "max_alt_total_exposure_pct": str(
-                    settings.risk.max_alt_total_exposure_pct
-                ),
-            }
-
-            current_symbol_position: dict[str, object] | None = None
-            for p in positions:
-                if p.symbol == symbol and p.quantity > 0:
-                    pos_price = trade_price
-                    pos_with = p.model_copy(update={"current_price": trade_price})
-                    pos_value = p.quantity * pos_price
-                    pos_pct = (
-                        float(pos_value / total_balance * Decimal("100"))
-                        if total_balance > 0
-                        else 0.0
-                    )
-                    current_symbol_position = {
-                        "quantity": str(p.quantity),
-                        "average_entry_price": str(p.average_entry_price),
-                        "unrealized_pnl_pct": str(pos_with.unrealized_pnl_pct or 0),
-                        "position_value_pct_of_portfolio": round(pos_pct, 2),
-                    }
-                    break
-
-            symbol_candles = strategy._candle_history.get(symbol, [])
-            recent_structure = _compute_recent_structure(symbol_candles)
-            volume_context = _compute_volume_context(symbol_candles)
-            if surge_context:
-                volume_context.update(surge_context)
-
-            advice = await llm_advisor.get_advice(
-                symbol,
-                market_summary,
-                strategy_signal_data,
-                technical_indicators=indicators_dict,
-                positions=position_data,
-                balance_info=balance_data,
-                recent_orders=recent_orders_data,
-                recent_candles=recent_candles_data,
-                previous_decisions=_recent_decisions.get(symbol, []),
-                btc_trend=btc_trend,
-                portfolio_exposure=portfolio_exposure,
-                risk_context=risk_context,
-                current_symbol_position=current_symbol_position,
-                recent_structure=recent_structure,
-                volume_context=volume_context,
-                news_context=_news_summary_cache,
-            )
+    if llm_advisor is not None and not skip_llm:
+        advice = await _get_llm_advice(
+            llm_advisor=llm_advisor,
+            symbol=symbol,
+            now=now,
+            trade_price=trade_price,
+            prev_close=prev_close,
+            md=md,
+            signals=signals,
+            positions=positions,
+            balances=balances,
+            total_balance=total_balance,
+            store=store,
+            strategy=strategy,
+            exchange_adapter=exchange_adapter,
+            settings=settings,
+            surge_context=surge_context,
+        )
+        if advice is not None:
             _last_llm_prices[symbol] = trade_price
             _last_llm_times[symbol] = time.time()
-        except Exception:
-            pass
 
-    # 8. Position protection: hard stop-loss, soft stop-loss (LLM), take-profit (LLM), trailing stop
-    risk_limits = settings.risk
-    protection_sold = False
-    for pos in positions:
-        if pos.symbol != symbol or pos.quantity <= 0:
-            continue
-
-        is_short = pos.side == PositionSide.SHORT
-        pos_with_price = pos.model_copy(update={"current_price": trade_price})
-        pnl_pct = pos_with_price.unrealized_pnl_pct
-        if pnl_pct is None:
-            continue
-
-        # For shorts: exit_side=BUY (cover), LLM action=COVER_CONSIDER
-        # For longs: exit_side=SELL, LLM action=SELL_CONSIDER
-        exit_side = OrderSide.BUY if is_short else OrderSide.SELL
-        llm_exit_action = "COVER_CONSIDER" if is_short else "SELL_CONSIDER"
-        exit_label = "COVER" if is_short else "SELL"
-
-        close_reason: str | None = None
-        use_market_order = False
-
-        if pnl_pct <= -abs(risk_limits.stop_loss_pct):
-            close_reason = (
-                f"hard_stop_loss: pnl={pnl_pct:.2f}% <= -{risk_limits.stop_loss_pct}%"
-            )
-            use_market_order = True
-
-        elif pnl_pct <= -abs(risk_limits.soft_stop_loss_pct):
-            if advice is not None and advice.action == llm_exit_action:
-                close_reason = (
-                    f"soft_stop_loss (LLM approved): pnl={pnl_pct:.2f}%, "
-                    f"LLM={advice.action}({advice.confidence})"
-                )
-            else:
-                log_event(
-                    "decision",
-                    {
-                        "symbol": symbol,
-                        "final_action": "HOLD",
-                        "trigger": "soft_stop_loss_held",
-                        "position_side": pos.side.value,
-                        "pnl_pct": str(pnl_pct),
-                        "llm_action": advice.action if advice else "none",
-                        "llm_reasoning": advice.reasoning if advice else "no LLM",
-                        "price": str(trade_price),
-                    },
-                )
-
-        elif risk_limits.trailing_stop_enabled:
-            if is_short:
-                # Short trailing: track price going DOWN, exit on bounce UP
-                lw = _low_watermarks.get(symbol, pos.average_entry_price)
-                if trade_price < lw:
-                    _low_watermarks[symbol] = trade_price
-                    lw = trade_price
-                if lw < pos.average_entry_price and lw > 0:
-                    bounce_from_low = (trade_price - lw) / lw * Decimal("100")
-                    if bounce_from_low >= risk_limits.trailing_stop_pct:
-                        close_reason = (
-                            f"trailing_stop_short: bounce={bounce_from_low:.2f}% "
-                            f"from low={lw}, threshold={risk_limits.trailing_stop_pct}%"
-                        )
-            else:
-                # Long trailing: track price going UP, exit on drop DOWN
-                hw = _high_watermarks.get(symbol, pos.average_entry_price)
-                if trade_price > hw:
-                    _high_watermarks[symbol] = trade_price
-                    hw = trade_price
-                if hw > pos.average_entry_price:
-                    drop_from_high = (hw - trade_price) / hw * Decimal("100")
-                    if drop_from_high >= risk_limits.trailing_stop_pct:
-                        close_reason = (
-                            f"trailing_stop: drop={drop_from_high:.2f}% "
-                            f"from high={hw}, threshold={risk_limits.trailing_stop_pct}%"
-                        )
-
-        if close_reason is not None:
-            log_event(
-                "decision",
-                {
-                    "symbol": symbol,
-                    "final_action": exit_label,
-                    "trigger": "position_protection",
-                    "position_side": pos.side.value,
-                    "reason": close_reason,
-                    "pnl_pct": str(pnl_pct),
-                    "price": str(trade_price),
-                },
-            )
-            intent = OrderIntent(
-                signal_id=uuid4(),
-                exchange=settings.exchange,
-                symbol=symbol,
-                side=exit_side,
-                order_type=OrderType.MARKET if use_market_order else OrderType.LIMIT,
-                quantity=pos.quantity,
-                price=trade_price,
-                reason=close_reason,
-                reduce_only=True,
-                position_side=pos.side if is_short else None,
-                timestamp=now,
-            )
-            order = await engine.execute(intent, state)
-            if order:
-                log_event(
-                    "order",
-                    {
-                        "order_id": order.order_id,
-                        "symbol": order.symbol,
-                        "side": order.side.value,
-                        "status": order.status.value,
-                        "quantity": str(order.quantity),
-                        "price": str(order.price),
-                        "trigger": "position_protection",
-                        "position_side": pos.side.value,
-                    },
-                )
-                if notifier and settings.is_live_mode():
-                    side_label = "COVER" if is_short else "SELL"
-                    await notifier.send_alert(
-                        f"포지션 보호 {side_label} 체결 요청",
-                        (
-                            f"{order.symbol} {side_label} {order.quantity} @ {order.price}"
-                            f"\nstatus={order.status.value}, trigger=position_protection"
-                        ),
-                        "high",
-                    )
-                if is_short:
-                    _low_watermarks.pop(symbol, None)
-                else:
-                    _high_watermarks.pop(symbol, None)
-                protection_sold = True
-
-    # Skip combined decision if position protection already executed a sell
+    # 6. Position protection: hard stop-loss, soft stop-loss, trailing stop
+    protection_sold = await _handle_position_protection(
+        symbol=symbol,
+        positions=positions,
+        trade_price=trade_price,
+        risk_limits=settings.risk,
+        advice=advice,
+        engine=engine,
+        settings=settings,
+        state=state,
+        notifier=notifier,
+        now=now,
+    )
     if protection_sold:
         return
 
-    # 9. Combined decision: strategy signals + LLM advice
+    # 7. Combined decision: strategy signals + LLM advice
     final_action = _resolve_action(signals, advice, settings)
-    if not _skip_llm:
+    if not skip_llm:
         log_event(
             "decision",
             {
@@ -1528,320 +1951,31 @@ async def _run_tick(
         if len(hist) > _MAX_DECISION_HISTORY:
             _recent_decisions[symbol] = hist[-_MAX_DECISION_HISTORY:]
 
+    # 8. Execute action
+    common_args = {
+        "symbol": symbol,
+        "signals": signals,
+        "advice": advice,
+        "settings": settings,
+        "engine": engine,
+        "state": state,
+        "notifier": notifier,
+        "trade_price": trade_price,
+        "now": now,
+    }
+
     if final_action == "BUY":
-        # Per-symbol buy cooldown: prevent rapid repeated buys on the same coin
-        _cooldown_elapsed = time.time() - _last_buy_ts.get(symbol, 0.0)
-        if _cooldown_elapsed < _BUY_COOLDOWN_SECONDS:
-            _remaining = int(_BUY_COOLDOWN_SECONDS - _cooldown_elapsed)
-            logger.info(
-                "buy_cooldown_active",
-                symbol=symbol,
-                remaining_sec=_remaining,
-            )
-            return
-
-        # Gate surge buys when universe is full
-        if surge_context and symbol not in _dynamic_symbols_cache:
-            max_sym = int(settings.dynamic_symbol_max_symbols)
-            conf = float(advice.confidence) if advice else 0.0
-            if len(_dynamic_symbols_cache) >= max_sym and conf < 0.8:
-                logger.info(
-                    "surge_buy_skipped_universe_full",
-                    symbol=symbol,
-                    universe_size=len(_dynamic_symbols_cache),
-                    max_symbols=max_sym,
-                    confidence=conf,
-                )
-                return
-
-        buy_pct = settings.risk.max_position_size_pct
-        if advice is not None and advice.buy_pct is not None:
-            buy_pct = max(
-                Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct)
-            )
-        # Cap surge buys to surge_max_buy_pct
-        if surge_context and buy_pct > settings.surge_max_buy_pct:
-            buy_pct = settings.surge_max_buy_pct
-        order_price = trade_price
-        if advice is not None and advice.target_price is not None:
-            order_price = advice.target_price
-        order_value = total_balance * buy_pct / Decimal("100")
-
-        min_order_value = _MIN_ORDER_VALUE.get(settings.quote_currency, Decimal("5"))
-        if order_value < min_order_value:
-            logger.info(
-                "buy_below_minimum",
-                symbol=symbol,
-                order_value=str(order_value),
-                minimum=str(min_order_value),
-            )
-            return
-
-        if order_value > 0:
-            use_market = advice is not None and advice.order_type == "market"
-            intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
-            intent_price = order_price  # always pass price for proper KRW sizing
-            reason_parts = [
-                (
-                    f"Strategy: {signals[0].metadata.get('reason', 'buy')}"
-                    if signals
-                    else ""
-                )
-            ]
-            if advice:
-                reason_parts.append(f"LLM: {advice.reasoning[:100]}")
-            intent = OrderIntent(
-                signal_id=signals[0].signal_id if signals else uuid4(),
-                exchange=settings.exchange,
-                symbol=symbol,
-                side=OrderSide.BUY,
-                order_type=intent_order_type,
-                quote_quantity=order_value,
-                price=intent_price,
-                reason=" | ".join(p for p in reason_parts if p),
-                timestamp=now,
-            )
-            order = await engine.execute(intent, state)
-            if order:
-                _last_buy_ts[symbol] = time.time()  # record buy for cooldown
-                if surge_context:
-                    _surge_cooldowns[symbol] = time.time()
-                    if symbol not in _dynamic_symbols_cache:
-                        _dynamic_symbols_cache.append(symbol)
-                        settings.trading_symbols = list(_dynamic_symbols_cache)
-                        logger.info(
-                            "surge_symbol_added_to_universe",
-                            symbol=symbol,
-                            universe_size=len(_dynamic_symbols_cache),
-                        )
-                log_event(
-                    "order",
-                    {
-                        "order_id": order.order_id,
-                        "symbol": order.symbol,
-                        "side": order.side.value,
-                        "status": order.status.value,
-                        "quantity": str(order.quantity),
-                        "price": str(order.price),
-                        "sizing_pct": str(buy_pct),
-                    },
-                )
-                if notifier and settings.is_live_mode():
-                    await notifier.send_alert(
-                        "실제 매수 체결 요청",
-                        (
-                            f"{order.symbol} BUY {order.quantity} @ {order.price}"
-                            f"\nstatus={order.status.value}, sizing_pct={buy_pct}"
-                        ),
-                        "medium",
-                    )
-
+        await _execute_buy(
+            **common_args,
+            total_balance=total_balance,
+            surge_context=surge_context,
+        )
     elif final_action == "SELL":
-        # Quick-flip protection: don't sell within cooldown period of buying
-        # unless it's a position protection sell (those happen in section 8, not here)
-        _sell_since_buy = time.time() - _last_buy_ts.get(symbol, 0.0)
-        if _sell_since_buy < _BUY_COOLDOWN_SECONDS:
-            logger.info(
-                "quick_flip_blocked",
-                symbol=symbol,
-                seconds_since_buy=int(_sell_since_buy),
-                cooldown=int(_BUY_COOLDOWN_SECONDS),
-            )
-            return
-
-        for pos in positions:
-            if pos.symbol == symbol and pos.quantity > 0:
-                sell_qty = pos.quantity
-                sell_pct = Decimal("100")
-                if advice is not None and advice.sell_pct is not None:
-                    sell_pct = max(Decimal("0"), min(advice.sell_pct, Decimal("100")))
-                    sell_qty = pos.quantity * sell_pct / Decimal("100")
-                if sell_qty <= 0:
-                    continue
-                # 잔여분이 최소 주문금액 미만이면 전량 매도 (거래소 최소 주문금액 미충족 방지)
-                remaining_qty = pos.quantity - sell_qty
-                remaining_value = remaining_qty * trade_price
-                min_order_value = _MIN_ORDER_VALUE.get(
-                    settings.quote_currency, Decimal("5")
-                )
-                if remaining_value < min_order_value:
-                    sell_qty = pos.quantity
-
-                order_price = trade_price
-                if advice is not None and advice.target_price is not None:
-                    order_price = advice.target_price
-                use_market = advice is not None and advice.order_type == "market"
-                intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
-                intent_price = None if use_market else order_price
-                reason_parts = [
-                    (
-                        f"Strategy: {signals[0].metadata.get('reason', 'sell')}"
-                        if signals
-                        else ""
-                    )
-                ]
-                if advice:
-                    reason_parts.append(f"LLM: {advice.reasoning[:100]}")
-                intent = OrderIntent(
-                    signal_id=signals[0].signal_id if signals else uuid4(),
-                    exchange=settings.exchange,
-                    symbol=symbol,
-                    side=OrderSide.SELL,
-                    order_type=intent_order_type,
-                    quantity=sell_qty,
-                    price=intent_price,
-                    reason=" | ".join(p for p in reason_parts if p),
-                    timestamp=now,
-                )
-                order = await engine.execute(intent, state)
-                if order:
-                    log_event(
-                        "order",
-                        {
-                            "order_id": order.order_id,
-                            "symbol": order.symbol,
-                            "side": order.side.value,
-                            "status": order.status.value,
-                            "quantity": str(order.quantity),
-                            "price": str(order.price),
-                            "sizing_pct": str(sell_pct),
-                        },
-                    )
-                    if notifier and settings.is_live_mode():
-                        await notifier.send_alert(
-                            "실제 매도 체결 요청",
-                            (
-                                f"{order.symbol} SELL {order.quantity} @ {order.price}"
-                                f"\nstatus={order.status.value}, sizing_pct={sell_pct}"
-                            ),
-                            "high",
-                        )
-
+        await _execute_sell(**common_args, positions=positions)
     elif final_action == "SHORT" and settings.risk.futures_enabled:
-        short_pct = settings.risk.max_position_size_pct
-        if advice is not None and advice.short_pct is not None:
-            short_pct = max(
-                Decimal("0"), min(advice.short_pct, settings.risk.max_position_size_pct)
-            )
-        order_price = trade_price
-        if advice is not None and advice.target_price is not None:
-            order_price = advice.target_price
-        order_value = total_balance * short_pct / Decimal("100")
-        if order_value > 0:
-            use_market = advice is not None and advice.order_type == "market"
-            intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
-            intent_price = None if use_market else order_price
-            reason_parts = [
-                (
-                    f"Strategy: {signals[0].metadata.get('reason', 'short')}"
-                    if signals
-                    else ""
-                )
-            ]
-            if advice:
-                reason_parts.append(f"LLM: {advice.reasoning[:100]}")
-            intent = OrderIntent(
-                signal_id=signals[0].signal_id if signals else uuid4(),
-                exchange=settings.exchange,
-                symbol=symbol,
-                side=OrderSide.SELL,
-                order_type=intent_order_type,
-                quote_quantity=order_value,
-                price=intent_price,
-                reason=" | ".join(p for p in reason_parts if p),
-                position_side=PositionSide.SHORT,
-                timestamp=now,
-            )
-            order = await engine.execute(intent, state)
-            if order:
-                log_event(
-                    "order",
-                    {
-                        "order_id": order.order_id,
-                        "symbol": order.symbol,
-                        "side": order.side.value,
-                        "status": order.status.value,
-                        "quantity": str(order.quantity),
-                        "price": str(order.price),
-                        "sizing_pct": str(short_pct),
-                        "position_side": "short",
-                    },
-                )
-                if notifier and settings.is_live_mode():
-                    await notifier.send_alert(
-                        "숏 포지션 진입 요청",
-                        (
-                            f"{order.symbol} SHORT {order.quantity} @ {order.price}"
-                            f"\nstatus={order.status.value}, sizing_pct={short_pct}"
-                        ),
-                        "medium",
-                    )
-
+        await _execute_short(**common_args, total_balance=total_balance)
     elif final_action == "COVER" and settings.risk.futures_enabled:
-        for pos in positions:
-            if (
-                pos.symbol == symbol
-                and pos.quantity > 0
-                and pos.side == PositionSide.SHORT
-            ):
-                cover_qty = pos.quantity
-                cover_pct = Decimal("100")
-                if advice is not None and advice.sell_pct is not None:
-                    cover_pct = max(Decimal("0"), min(advice.sell_pct, Decimal("100")))
-                    cover_qty = pos.quantity * cover_pct / Decimal("100")
-                if cover_qty <= 0:
-                    continue
-
-                use_market = advice is not None and advice.order_type == "market"
-                intent_order_type = OrderType.MARKET if use_market else OrderType.LIMIT
-                intent_price = trade_price  # always pass price for proper sizing
-                reason_parts = [
-                    (
-                        f"Strategy: {signals[0].metadata.get('reason', 'cover')}"
-                        if signals
-                        else ""
-                    )
-                ]
-                if advice:
-                    reason_parts.append(f"LLM: {advice.reasoning[:100]}")
-                intent = OrderIntent(
-                    signal_id=signals[0].signal_id if signals else uuid4(),
-                    exchange=settings.exchange,
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    order_type=intent_order_type,
-                    quantity=cover_qty,
-                    price=intent_price,
-                    reason=" | ".join(p for p in reason_parts if p),
-                    reduce_only=True,
-                    position_side=PositionSide.SHORT,
-                    timestamp=now,
-                )
-                order = await engine.execute(intent, state)
-                if order:
-                    log_event(
-                        "order",
-                        {
-                            "order_id": order.order_id,
-                            "symbol": order.symbol,
-                            "side": order.side.value,
-                            "status": order.status.value,
-                            "quantity": str(order.quantity),
-                            "price": str(order.price),
-                            "sizing_pct": str(cover_pct),
-                            "position_side": "short",
-                        },
-                    )
-                    if notifier and settings.is_live_mode():
-                        await notifier.send_alert(
-                            "숏 포지션 커버 요청",
-                            (
-                                f"{order.symbol} COVER {order.quantity} @ {order.price}"
-                                f"\nstatus={order.status.value}, sizing_pct={cover_pct}"
-                            ),
-                            "high",
-                        )
-                _low_watermarks.pop(symbol, None)
+        await _execute_cover(**common_args, positions=positions)
 
 
 @click.command()
