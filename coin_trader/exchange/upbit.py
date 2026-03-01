@@ -9,14 +9,19 @@ import re
 import uuid
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Protocol, TypeAlias, cast
+from typing import Protocol, cast
 from urllib.parse import unquote, urlencode
 
 import httpx
 import jwt  # PyJWT
 from typing_extensions import override
 
-from coin_trader.exchange.base import BaseExchangeAdapter
+from coin_trader.exchange.base import (
+    BaseExchangeAdapter,
+    JsonObject,
+    QueryParams,
+    _as_str_object_dict,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -47,20 +52,6 @@ class _JwtEncode(Protocol):
 
 _jwt_encode = cast(_JwtEncode, jwt.encode)
 
-
-QueryParams: TypeAlias = dict[str, str]
-JsonObject: TypeAlias = dict[str, object]
-JsonArray: TypeAlias = list[object]
-
-
-def _as_str_object_dict(value: object) -> JsonObject | None:
-    if not isinstance(value, dict):
-        return None
-    raw = cast(dict[object, object], value)
-    for key in raw.keys():
-        if not isinstance(key, str):
-            return None
-    return cast(JsonObject, raw)
 
 
 _UPBIT_INTERVAL_MAP: dict[str, str] = {

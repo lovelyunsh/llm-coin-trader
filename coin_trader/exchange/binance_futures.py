@@ -11,13 +11,17 @@ import hmac
 import logging
 import time
 from decimal import Decimal
-from typing import TypeAlias, cast
 from urllib.parse import urlencode
 
 import httpx
 from typing_extensions import override
 
-from coin_trader.exchange.base import BaseExchangeAdapter
+from coin_trader.exchange.base import (
+    BaseExchangeAdapter,
+    JsonObject,
+    QueryParams,
+    _as_str_object_dict,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -28,20 +32,6 @@ _WEIGHT_HARD = 2300   # heavy throttle above this (~96%)
 
 BINANCE_FUTURES_PROD_URL: str = "https://fapi.binance.com"
 BINANCE_FUTURES_TESTNET_URL: str = "https://testnet.binancefuture.com"
-
-QueryParams: TypeAlias = dict[str, str]
-JsonObject: TypeAlias = dict[str, object]
-JsonArray: TypeAlias = list[object]
-
-
-def _as_str_object_dict(value: object) -> JsonObject | None:
-    if not isinstance(value, dict):
-        return None
-    raw = cast(dict[object, object], value)
-    for key in raw.keys():
-        if not isinstance(key, str):
-            return None
-    return cast(JsonObject, raw)
 
 
 def _to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
