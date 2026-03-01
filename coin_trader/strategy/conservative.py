@@ -85,6 +85,9 @@ class TechnicalIndicators:
         }
         if "ema200" in d:
             d["ema200_1h"] = d.pop("ema200")
+        # Rename vol_ratio to clarify it is ATR-based volatility, not volume
+        if "vol_ratio" in d:
+            d["atr_volatility_ratio"] = d.pop("vol_ratio")
         return d
 
 
