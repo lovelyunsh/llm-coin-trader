@@ -100,6 +100,58 @@ _news_fetch_ts: float = 0.0
 _news_summary_cache: str | None = None
 
 
+async def _restore_state_on_startup(components: dict[str, Any]) -> None:
+    """Restore in-memory watermarks and buy timestamps from DB on startup.
+
+    Prevents false trailing-stop triggers after container restart by
+    initializing high watermarks to max(entry_price, current_price).
+    """
+    broker = components.get("broker")
+    store: StateStore | None = components.get("store")
+    if broker is None:
+        return
+
+    try:
+        positions = await broker.fetch_positions()
+        restored_wm = 0
+        for pos in positions:
+            if pos.quantity <= 0 or pos.symbol is None:
+                continue
+            entry = pos.average_entry_price or Decimal("0")
+            current = pos.current_price or entry
+            if entry > 0:
+                _high_watermarks[pos.symbol] = max(entry, current)
+                restored_wm += 1
+        logger.info("watermarks_restored", count=restored_wm)
+    except Exception:
+        logger.warning("watermark_restore_failed", exc_info=True)
+
+    if store is None:
+        return
+    try:
+        recent_orders = await store.get_all_orders(limit=200)
+        restored_ts = 0
+        for order in recent_orders:
+            sym = order.symbol
+            if sym is None or order.side is None:
+                continue
+            if order.side.value == "buy" and order.status and order.status.value == "filled":
+                if sym not in _last_buy_ts:
+                    ts_str = order.updated_at or order.created_at or ""
+                    if ts_str:
+                        try:
+                            from datetime import datetime as _dt
+
+                            dt = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            _last_buy_ts[sym] = dt.timestamp()
+                            restored_ts += 1
+                        except (ValueError, AttributeError):
+                            pass
+        logger.info("buy_timestamps_restored", count=restored_ts)
+    except Exception:
+        logger.warning("buy_timestamp_restore_failed", exc_info=True)
+
+
 async def _build_system(
     settings: Settings, *, install_signal_handlers: bool = False
 ) -> dict[str, Any]:
@@ -308,9 +360,10 @@ def _resolve_action(
         return strategy_type.value.upper()
 
     if advice is None:
-        # LLM skipped or failed: hold position.
+        # LLM skipped or failed: never trade without LLM confirmation.
         # Hard stop-loss / trailing stop handled independently in
         # position_protection (section 6).
+        logger.info("no_llm_advice_hold", strategy_signal=strategy_type.value)
         return "HOLD"
 
     llm_action = advice.action
@@ -481,6 +534,19 @@ async def _compute_btc_trend(
         return result
     except Exception:
         return None
+
+
+def _is_btc_strong_downtrend() -> bool:
+    """Check if BTC daily is in a strong downtrend (below EMA200, ADX>40, RSI<40)."""
+    if not _btc_trend_cache:
+        return False
+    try:
+        above_ema = _btc_trend_cache.get("price_above_ema200", True)
+        adx = float(_btc_trend_cache.get("adx", 0))
+        rsi = float(_btc_trend_cache.get("rsi", 50))
+        return not above_ema and adx > 40 and rsi < 40
+    except (TypeError, ValueError):
+        return False
 
 
 def _chunk_symbols(symbols: list[str], size: int) -> list[list[str]]:
@@ -1395,6 +1461,15 @@ def _check_trailing_stop(
     is_short: bool,
 ) -> str | None:
     """Check trailing stop condition and return close reason if triggered."""
+    # Skip trailing stop if position is too young (min hold time)
+    min_hold_sec = float(risk_limits.trailing_stop_min_hold_hours) * 3600.0
+    last_buy = _last_buy_ts.get(symbol, 0.0)
+    if last_buy > 0 and (time.time() - last_buy) < min_hold_sec:
+        return None
+
+    # Effective trailing stop %: use configured value as floor
+    effective_pct = risk_limits.trailing_stop_pct
+
     if is_short:
         lw = _low_watermarks.get(symbol, pos.average_entry_price)
         if trade_price < lw:
@@ -1402,10 +1477,10 @@ def _check_trailing_stop(
             lw = trade_price
         if lw < pos.average_entry_price and lw > 0:
             bounce_from_low = (trade_price - lw) / lw * Decimal("100")
-            if bounce_from_low >= risk_limits.trailing_stop_pct:
+            if bounce_from_low >= effective_pct:
                 return (
                     f"trailing_stop_short: bounce={bounce_from_low:.2f}% "
-                    f"from low={lw}, threshold={risk_limits.trailing_stop_pct}%"
+                    f"from low={lw}, threshold={effective_pct}%"
                 )
     else:
         hw = _high_watermarks.get(symbol, pos.average_entry_price)
@@ -1414,10 +1489,10 @@ def _check_trailing_stop(
             hw = trade_price
         if hw > pos.average_entry_price:
             drop_from_high = (hw - trade_price) / hw * Decimal("100")
-            if drop_from_high >= risk_limits.trailing_stop_pct:
+            if drop_from_high >= effective_pct:
                 return (
                     f"trailing_stop: drop={drop_from_high:.2f}% "
-                    f"from high={hw}, threshold={risk_limits.trailing_stop_pct}%"
+                    f"from high={hw}, threshold={effective_pct}%"
                 )
     return None
 
@@ -1435,6 +1510,7 @@ async def _execute_buy(
     total_balance: Decimal,
     now: datetime,
     surge_context: dict[str, object] | None,
+    positions: list[Any] | None = None,
 ) -> None:
     """Execute a BUY action with cooldown, sizing, and surge gating."""
     cooldown_elapsed = time.time() - _last_buy_ts.get(symbol, 0.0)
@@ -1444,29 +1520,55 @@ async def _execute_buy(
         return
 
     if surge_context and symbol not in _dynamic_symbols_cache:
-        max_sym = int(settings.dynamic_symbol_max_symbols)
+        max_pos = int(settings.risk.max_positions)
+        active_positions = sum(
+            1 for p in (positions or []) if p.quantity > 0
+        )
         conf = float(advice.confidence) if advice else 0.0
-        if len(_dynamic_symbols_cache) >= max_sym and conf < 0.8:
+        if active_positions >= max_pos and conf < 0.8:
             logger.info(
-                "surge_buy_skipped_universe_full",
+                "surge_buy_skipped_positions_full",
                 symbol=symbol,
-                universe_size=len(_dynamic_symbols_cache),
-                max_symbols=max_sym,
+                active_positions=active_positions,
+                max_positions=max_pos,
                 confidence=conf,
             )
             return
 
-    buy_pct = settings.risk.max_position_size_pct
+    # BTC downtrend filter: reduce size and raise confidence bar
+    btc_downtrend = _is_btc_strong_downtrend()
+    if btc_downtrend:
+        conf = float(advice.confidence) if advice else 0.0
+        if conf < 0.75:
+            logger.info(
+                "btc_downtrend_buy_blocked",
+                symbol=symbol,
+                confidence=conf,
+                required=0.75,
+                llm_available=advice is not None,
+            )
+            return
+        logger.info("btc_downtrend_buy_reduced", symbol=symbol, confidence=conf)
+
     if advice is not None and advice.buy_pct is not None:
         buy_pct = max(
             Decimal("0"), min(advice.buy_pct, settings.risk.max_position_size_pct)
         )
+    else:
+        # Fallback: cap at 10% — no LLM conviction means conservative sizing
+        buy_pct = min(Decimal("10"), settings.risk.max_position_size_pct)
     if surge_context and buy_pct > settings.surge_max_buy_pct:
         buy_pct = settings.surge_max_buy_pct
+    if btc_downtrend:
+        buy_pct = buy_pct / Decimal("2")
 
     order_price = trade_price
     if advice is not None and advice.target_price is not None:
         order_price = advice.target_price
+    else:
+        # Improve limit buy fill rate: place slightly above current price
+        spread = settings.buy_limit_spread_pct / Decimal("100")
+        order_price = trade_price * (Decimal("1") + spread)
     order_value = total_balance * buy_pct / Decimal("100")
 
     min_order_value = _MIN_ORDER_VALUE.get(settings.quote_currency, Decimal("5"))
@@ -1969,6 +2071,7 @@ async def _run_tick(
             **common_args,
             total_balance=total_balance,
             surge_context=surge_context,
+            positions=positions,
         )
     elif final_action == "SELL":
         await _execute_sell(**common_args, positions=positions)
