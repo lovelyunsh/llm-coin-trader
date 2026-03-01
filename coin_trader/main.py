@@ -135,18 +135,24 @@ async def _restore_state_on_startup(components: dict[str, Any]) -> None:
             sym = order.symbol
             if sym is None or order.side is None:
                 continue
-            if order.side.value == "buy" and order.status and order.status.value == "filled":
+            side_val = order.side.value if hasattr(order.side, "value") else str(order.side)
+            status_val = order.status.value if order.status and hasattr(order.status, "value") else str(order.status or "")
+            if side_val == "buy" and status_val == "filled":
                 if sym not in _last_buy_ts:
-                    ts_str = order.updated_at or order.created_at or ""
-                    if ts_str:
-                        try:
+                    ts = order.updated_at or order.created_at
+                    if ts is None:
+                        continue
+                    try:
+                        # ts may be datetime or str depending on serialization
+                        if hasattr(ts, "timestamp"):
+                            _last_buy_ts[sym] = ts.timestamp()
+                        else:
                             from datetime import datetime as _dt
-
-                            dt = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            dt = _dt.fromisoformat(str(ts).replace("Z", "+00:00"))
                             _last_buy_ts[sym] = dt.timestamp()
-                            restored_ts += 1
-                        except (ValueError, AttributeError):
-                            pass
+                        restored_ts += 1
+                    except (ValueError, AttributeError, TypeError):
+                        pass
         logger.info("buy_timestamps_restored", count=restored_ts)
     except Exception:
         logger.warning("buy_timestamp_restore_failed", exc_info=True)
